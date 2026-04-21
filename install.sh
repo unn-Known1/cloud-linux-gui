@@ -15,9 +15,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-PORT=8080
 SCRIPT_DIR="/opt/cloud-linux-gui"
-LOG_FILE="/tmp/cloud-linux-gui-install.log"
+NOVNC_DIR="$SCRIPT_DIR/noVNC"
 
 # Print functions
 print_header() {
@@ -36,13 +35,6 @@ print_success() {
 
 print_error() {
     echo -e "${RED}[✗] $1${NC}"
-}
-
-# Check if running as root
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${YELLOW}[!] Running as non-root user - will use sudo where needed${NC}"
-    fi
 }
 
 # Detect OS
@@ -68,25 +60,31 @@ detect_os() {
 install_dependencies() {
     print_step "Installing dependencies..."
 
-    # Update package list
     if command -v apt-get &> /dev/null; then
         sudo apt-get update -qq 2>/dev/null || true
-        sudo apt-get install -y -qq \
+        sudo apt-get install -y \
             xfce4 xfce4-goodies xorg dbus-x11 \
-            novnc novnc-webclient \
-            tightvncserver websockify \
+            tigervnc-standalone-server tigervnc-common \
+            websockify \
             curl wget git nano vim \
-            fonts-noto-cjk 2>/dev/null || true
+            fonts-noto-cjk 2>/dev/null || {
+            print_error "Failed to install some packages, trying alternatives..."
+            sudo apt-get install -y \
+                xfce4 xfce4-goodies xorg dbus-x11 \
+                tightvncserver websockify \
+                curl wget git nano vim \
+                fonts-noto-cjk 2>/dev/null || true
+        }
     elif command -v yum &> /dev/null; then
         sudo yum install -y \
             xfce4-session dbus-x11 \
-            novnc websockify \
             tigervnc-server \
+            websockify \
             curl wget git nano vim 2>/dev/null || true
     elif command -v apk &> /dev/null; then
         sudo apk add \
             xfce4 dbus-x11 \
-            novnc websockify \
+            websockify \
             curl wget git nano vim 2>/dev/null || true
     fi
 
@@ -102,7 +100,6 @@ install_cloudflared() {
         return
     fi
 
-    # Detect architecture
     ARCH=$(uname -m)
     case $ARCH in
         x86_64)
@@ -119,14 +116,9 @@ install_cloudflared() {
             ;;
     esac
 
-    # Download and install cloudflared
     CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CLOUDFLARED_ARCH}"
 
-    if command -v curl &> /dev/null; then
-        curl -sL "$CLOUDFLARED_URL" -o /tmp/cloudflared
-    else
-        wget -q "$CLOUDFLARED_URL" -O /tmp/cloudflared 2>/dev/null || true
-    fi
+    curl -sL "$CLOUDFLARED_URL" -o /tmp/cloudflared 2>/dev/null || wget -q "$CLOUDFLARED_URL" -O /tmp/cloudflared
 
     if [ -f /tmp/cloudflared ]; then
         chmod +x /tmp/cloudflared
@@ -138,22 +130,42 @@ install_cloudflared() {
     fi
 }
 
-# Create directories
-create_directories() {
-    print_step "Creating directories..."
+# Install noVNC from GitHub
+install_novnc() {
+    print_step "Installing noVNC from GitHub..."
 
-    sudo mkdir -p "$SCRIPT_DIR"
-    sudo mkdir -p "$SCRIPT_DIR/web"
-    sudo mkdir -p "$SCRIPT_DIR/vnc"
+    sudo mkdir -p "$NOVNC_DIR"
 
-    print_success "Directories created"
+    if [ -d "$NOVNC_DIR/.git" ]; then
+        cd "$NOVNC_DIR"
+        git pull 2>/dev/null || true
+    else
+        git clone --depth 1 https://github.com/novnc/noVNC.git "$NOVNC_DIR" 2>/dev/null || {
+            print_error "Failed to clone noVNC, trying wget..."
+            curl -sL https://github.com/novnc/noVNC/archive/refs/heads/master.tar.gz -o /tmp/novnc.tar.gz
+            if [ -f /tmp/novnc.tar.gz ]; then
+                tar -xzf /tmp/novnc.tar.gz -C "$SCRIPT_DIR"
+                sudo mv "$SCRIPT_DIR/noVNC-master" "$NOVNC_DIR"
+                rm -f /tmp/novnc.tar.gz
+            fi
+        }
+    fi
+
+    if [ -d "$NOVNC_DIR" ] && [ -f "$NOVNC_DIR/vnc.html" ]; then
+        print_success "noVNC installed"
+    else
+        print_error "Failed to install noVNC"
+        exit 1
+    fi
 }
 
-# Install noVNC web interface
-install_novnc() {
-    print_step "Installing noVNC web interface..."
+# Create web interface
+create_web_interface() {
+    print_step "Creating web interface..."
 
-    # Create web index.html
+    sudo mkdir -p "$SCRIPT_DIR/web"
+
+    # Create index.html (landing page)
     sudo tee "$SCRIPT_DIR/web/index.html" > /dev/null << 'HTML_EOF'
 <!DOCTYPE html>
 <html lang="en">
@@ -173,15 +185,8 @@ install_novnc() {
             justify-content: center;
             color: #fff;
         }
-        .container {
-            text-align: center;
-            padding: 40px;
-        }
-        .logo {
-            font-size: 72px;
-            margin-bottom: 20px;
-            animation: pulse 2s infinite;
-        }
+        .container { text-align: center; padding: 40px; }
+        .logo { font-size: 72px; margin-bottom: 20px; animation: pulse 2s infinite; }
         @keyframes pulse {
             0%, 100% { transform: scale(1); }
             50% { transform: scale(1.05); }
@@ -193,11 +198,7 @@ install_novnc() {
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
-        .subtitle {
-            font-size: 1.2rem;
-            color: #888;
-            margin-bottom: 40px;
-        }
+        .subtitle { font-size: 1.2rem; color: #888; margin-bottom: 40px; }
         .btn {
             display: inline-block;
             padding: 15px 40px;
@@ -209,21 +210,9 @@ install_novnc() {
             transition: all 0.3s ease;
             box-shadow: 0 4px 15px rgba(0, 212, 255, 0.3);
         }
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(0, 212, 255, 0.4);
-        }
-        .info {
-            margin-top: 40px;
-            padding: 20px;
-            background: rgba(255,255,255,0.05);
-            border-radius: 15px;
-            max-width: 500px;
-        }
-        .info p {
-            margin: 8px 0;
-            color: #aaa;
-        }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0, 212, 255, 0.4); }
+        .info { margin-top: 40px; padding: 20px; background: rgba(255,255,255,0.05); border-radius: 15px; max-width: 500px; }
+        .info p { margin: 8px 0; color: #aaa; }
         .status {
             display: inline-block;
             width: 10px;
@@ -233,17 +222,7 @@ install_novnc() {
             margin-right: 8px;
             animation: blink 1s infinite;
         }
-        @keyframes blink {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        .keyboard-hint {
-            margin-top: 30px;
-            padding: 15px;
-            background: rgba(0,212,255,0.1);
-            border-radius: 10px;
-            font-size: 0.9rem;
-        }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     </style>
 </head>
 <body>
@@ -251,119 +230,107 @@ install_novnc() {
         <div class="logo">🖥️</div>
         <h1>Cloud Linux GUI</h1>
         <p class="subtitle">Full Linux Desktop - Accessible from Anywhere</p>
-
         <a href="/vnc.html" class="btn">🚀 Launch Desktop</a>
-
         <div class="info">
             <p><span class="status"></span>System Ready</p>
             <p>Full XFCE4 Desktop Environment</p>
             <p>Access from any browser, any device</p>
-        </div>
-
-        <div class="keyboard-hint">
-            <strong>⌨️ Keyboard Shortcuts:</strong> F8 = Menu | Ctrl+Alt+Shift = Release
         </div>
     </div>
 </body>
 </html>
 HTML_EOF
 
-    print_success "Web interface installed"
+    print_success "Web interface created"
 }
 
-# Configure VNC server
-configure_vnc() {
-    print_step "Configuring VNC server..."
+# Configure and start VNC
+setup_vnc() {
+    print_step "Setting up VNC server..."
 
     # Create VNC config directory
     mkdir -p ~/.vnc
 
-    # Create VNC password if not exists
-    if [ ! -f ~/.vnc/passwd ]; then
-        echo "cloudlinux" | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
-        chmod 600 ~/.vnc/passwd
-    fi
-
     # Create xstartup script
     cat > ~/.vnc/xstartup << 'VNC_EOF'
 #!/bin/sh
-# Uncomment the following two lines for normal desktop:
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
+unset XDG_RUNTIME_DIR
 
-# Fix D-Bus issues
+# Start XFCE4
 dbus-launch --exit-with-session startxfce4 &
-
-# Start XFCE4 session
 exec startxfce4
 VNC_EOF
 
     chmod +x ~/.vnc/xstartup
-
     print_success "VNC configured"
 }
 
-# Start VNC server
-start_vnc() {
+# Start services
+start_services() {
     print_step "Starting VNC server..."
 
-    # Kill existing VNC servers
-    pkill -f "vncserver :1" 2>/dev/null || true
-    pkill -f "Xvfb :1" 2>/dev/null || true
-
+    # Kill existing
+    pkill -f "vncserver" 2>/dev/null || true
+    pkill -f "Xvfb" 2>/dev/null || true
     sleep 1
 
-    # Start Xvfb (virtual framebuffer)
+    # Start Xvfb
     export DISPLAY=:1
     Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
     sleep 2
 
-    # Start VNC server
-    vncserver :1 -geometry 1920x1080 -depth 24 &
+    # Start VNC
+    vncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup 2>/dev/null || \
+    tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup 2>/dev/null || {
+        # Fallback: just start with basic xstartup
+        vncserver :1 -geometry 1920x1080 -depth 24 2>/dev/null || \
+        tigervncserver :1 -geometry 1920x1080 -depth 24
+    }
     sleep 2
 
-    print_success "VNC server started on :1"
+    print_success "VNC server started on :1 (port 5901)"
 }
 
 # Start noVNC
 start_novnc() {
     print_step "Starting noVNC..."
 
-    # Kill existing websockify
-    pkill -f "websockify :80" 2>/dev/null || true
-
+    pkill -f "websockify.*6080" 2>/dev/null || true
     sleep 1
 
-    # Start websockify with noVNC
-    cd /usr/share/novnc
-    nohup ./utils/launch.sh --vpn --listen 80 --web "$SCRIPT_DIR/web" > /tmp/novnc.log 2>&1 &
+    cd "$NOVNC_DIR"
 
-    # Alternative if noVNC launch script not found
-    if [ ! -f /usr/share/novnc/utils/launch.sh ]; then
-        websockify --web="$SCRIPT_DIR/web" 80 localhost:5901 &
+    # Use websockify to proxy VNC
+    nohup websockify --web="$SCRIPT_DIR/web" 6080 localhost:5901 > /tmp/novnc.log 2>&1 &
+
+    # Alternative: use noVNC's launch script if available
+    if [ -f "$NOVNC_DIR/utils/launch.sh" ]; then
+        pkill -f "launch.sh" 2>/dev/null || true
+        sleep 1
+        nohup "$NOVNC_DIR/utils/launch.sh" --listen 6080 --vnc localhost:5901 > /tmp/novnc.log 2>&1 &
     fi
 
     sleep 2
-    print_success "noVNC started on port 80"
+    print_success "noVNC started on port 6080"
 }
 
 # Start Cloudflare Tunnel
 start_tunnel() {
     print_step "Starting Cloudflare Tunnel..."
 
-    # Kill existing cloudflared
     pkill -f "cloudflared tunnel" 2>/dev/null || true
-
     sleep 1
 
-    # Start cloudflared tunnel
-    nohup cloudflared tunnel --url http://localhost:80 --logfile /tmp/cloudflared.log --metrics 0.0.0.0:9090 > /tmp/tunnel.log 2>&1 &
+    # Start cloudflared tunnel to port 6080 (where noVNC is listening)
+    nohup cloudflared tunnel --url http://localhost:6080 --logfile /tmp/cloudflared.log > /tmp/tunnel.log 2>&1 &
 
-    sleep 5
+    sleep 8
 
     # Get tunnel URL
     TUNNEL_URL=""
-    for i in {1..10}; do
+    for i in {1..15}; do
         if [ -f /tmp/tunnel.log ]; then
             TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log 2>/dev/null | head -1)
             if [ -n "$TUNNEL_URL" ]; then
@@ -386,129 +353,64 @@ start_tunnel() {
         echo ""
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-        # Save URL for reference
         echo "$TUNNEL_URL" > "$SCRIPT_DIR/tunnel_url.txt"
     else
         print_error "Failed to get tunnel URL. Check /tmp/tunnel.log"
+        cat /tmp/tunnel.log 2>/dev/null | tail -20
     fi
 }
 
-# Create tunnel management script
-create_tunnel_script() {
-    print_step "Creating tunnel management script..."
+# Create management scripts
+create_scripts() {
+    print_step "Creating management scripts..."
 
     sudo tee "$SCRIPT_DIR/tunnel.sh" > /dev/null << 'SCRIPT_EOF'
 #!/bin/bash
-# Cloud Linux GUI - Tunnel Management Script
-
 SCRIPT_DIR="/opt/cloud-linux-gui"
-LOG_FILE="/tmp/cloudflared.log"
-
-start_tunnel() {
-    echo "Starting Cloudflare Tunnel..."
-    pkill -f "cloudflared tunnel" 2>/dev/null || true
-    sleep 1
-    nohup cloudflared tunnel --url http://localhost:80 --logfile /tmp/cloudflared.log --metrics 0.0.0.0:9090 > /tmp/tunnel.log 2>&1 &
-    sleep 5
-
-    TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log 2>/dev/null | head -1)
-    if [ -n "$TUNNEL_URL" ]; then
-        echo ""
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "Your Cloud Linux Desktop:"
-        echo "$TUNNEL_URL"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "$TUNNEL_URL" > "$SCRIPT_DIR/tunnel_url.txt"
-    else
-        echo "Waiting for tunnel URL..."
-        for i in {1..10}; do
-            sleep 2
-            TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log 2>/dev/null | head -1)
-            if [ -n "$TUNNEL_URL" ]; then
-                echo ""
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "Your Cloud Linux Desktop:"
-                echo "$TUNNEL_URL"
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "$TUNNEL_URL" > "$SCRIPT_DIR/tunnel_url.txt"
-                break
-            fi
-        done
-    fi
-}
-
-stop_tunnel() {
-    echo "Stopping Cloudflare Tunnel..."
-    pkill -f "cloudflared tunnel" 2>/dev/null || true
-    echo "Tunnel stopped"
-}
 
 case "$1" in
     start)
-        start_tunnel
+        echo "Starting services..."
+        export DISPLAY=:1
+        [ -f ~/.vnc/xstartup ] || (mkdir -p ~/.vnc && cat > ~/.vnc/xstartup << 'VNC'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+dbus-launch --exit-with-session startxfce4 &
+exec startxfce4
+VNC
+chmod +x ~/.vnc/xstartup)
+        Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+        sleep 2
+        vncserver :1 -geometry 1920x1080 -depth 24 2>/dev/null || tigervncserver :1 -geometry 1920x1080 -depth 24
+        sleep 2
+        cd "$SCRIPT_DIR/noVNC"
+        websockify --web="$SCRIPT_DIR/web" 6080 localhost:5901 > /tmp/novnc.log 2>&1 &
+        sleep 2
+        cloudflared tunnel --url http://localhost:6080 --logfile /tmp/cloudflared.log > /tmp/tunnel.log 2>&1 &
+        sleep 8
+        grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log 2>/dev/null | head -1
         ;;
     stop)
-        stop_tunnel
-        ;;
-    restart)
-        stop_tunnel
-        sleep 2
-        start_tunnel
+        pkill -f "cloudflared|vncserver|Xvfb|websockify" 2>/dev/null
+        echo "All services stopped"
         ;;
     url)
-        if [ -f "$SCRIPT_DIR/tunnel_url.txt" ]; then
-            cat "$SCRIPT_DIR/tunnel_url.txt"
-        else
-            echo "No tunnel URL found. Run 'tunnel.sh start'"
-        fi
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|url}"
-        exit 1
+        cat "$SCRIPT_DIR/tunnel_url.txt" 2>/dev/null || echo "Run 'tunnel.sh start' first"
         ;;
 esac
 SCRIPT_EOF
 
     sudo chmod +x "$SCRIPT_DIR/tunnel.sh"
-    print_success "Tunnel script created"
+    print_success "Scripts created"
 }
 
-# Create quick-access script
-create_quick_access() {
-    print_step "Creating quick-access scripts..."
-
-    sudo tee "/usr/local/bin/cloud-linux" > /dev/null << 'ACCESS_EOF'
-#!/bin/bash
-# Quick access to Cloud Linux GUI
-
-if [ -f "/opt/cloud-linux-gui/tunnel_url.txt" ]; then
-    URL=$(cat "/opt/cloud-linux-gui/tunnel_url.txt")
-    echo "Opening Cloud Linux GUI: $URL"
-    if command -v xdg-open &> /dev/null; then
-        xdg-open "$URL" 2>/dev/null || echo "$URL"
-    else
-        echo "$URL"
-    fi
-else
-    echo "Cloud Linux GUI not running. Run: /opt/cloud-linux-gui/tunnel.sh start"
-fi
-ACCESS_EOF
-
-    sudo chmod +x "/usr/local/bin/cloud-linux"
-    print_success "Quick access script created"
-}
-
-# Display final status
+# Display status
 display_status() {
     echo ""
     echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║${NC}         ✅ INSTALLATION COMPLETE! ✅                   ${GREEN}║${NC}"
     echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    echo -e "   ${BLUE}Services Status:${NC}"
-    echo -e "   • VNC Server: ${GREEN}Running on :1${NC}"
-    echo -e "   • noVNC: ${GREEN}Running on port 80${NC}"
-    echo -e "   • Cloudflare Tunnel: ${GREEN}Active${NC}"
     echo ""
 
     if [ -f "$SCRIPT_DIR/tunnel_url.txt" ]; then
@@ -523,27 +425,25 @@ display_status() {
     fi
 
     echo ""
-    echo -e "   ${YELLOW}Management Commands:${NC}"
-    echo -e "   • View URL: ${BLUE}cat /opt/cloud-linux-gui/tunnel_url.txt${NC}"
-    echo -e "   • Restart Tunnel: ${BLUE}/opt/cloud-linux-gui/tunnel.sh restart${NC}"
-    echo -e "   • Stop All: ${BLUE}pkill -f 'Xvfb|vncserver|novnc|cloudflared'${NC}"
+    echo -e "   ${YELLOW}Commands:${NC}"
+    echo -e "   • View URL: ${BLUE}cat $SCRIPT_DIR/tunnel_url.txt${NC}"
+    echo -e "   • Restart: ${BLUE}$SCRIPT_DIR/tunnel.sh start${NC}"
+    echo -e "   • Stop: ${BLUE}$SCRIPT_DIR/tunnel.sh stop${NC}"
     echo ""
 }
 
-# Main installation
+# Main
 main() {
     print_header
-    check_root
     detect_os
     install_dependencies
     install_cloudflared
-    create_directories
     install_novnc
-    configure_vnc
-    start_vnc
+    create_web_interface
+    setup_vnc
+    start_services
     start_novnc
-    create_tunnel_script
-    create_quick_access
+    create_scripts
     start_tunnel
     display_status
 }
