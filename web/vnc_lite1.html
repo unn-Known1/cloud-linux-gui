@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Cloud Linux GUI - Desktop</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #1a1a2e;
+            height: 100%;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        html { height: 100%; }
+
+        #loading {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 100%);
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            z-index: 1000; transition: opacity 0.5s ease;
+        }
+        #loading.hidden { opacity: 0; pointer-events: none; }
+
+        .logo { font-size: 90px; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.1)} }
+
+        .title {
+            font-size: 2rem; margin-top: 20px;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .subtitle { color: #888; font-size: 1rem; margin-top: 10px; }
+
+        .spinner {
+            width: 50px; height: 50px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: #00d4ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-top: 30px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        #screen {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+        }
+        #screen:focus { outline: none; }
+
+        /* Status bar */
+        #status-bar {
+            position: fixed; top: 15px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(26,26,46,0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 25px;
+            padding: 10px 20px;
+            color: #00d4ff; font-size: 13px;
+            z-index: 100;
+            border: 1px solid rgba(0,212,255,0.3);
+            display: flex; align-items: center; gap: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            max-width: 90vw; white-space: nowrap; overflow: hidden;
+        }
+        .dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #888; flex-shrink: 0;
+            animation: pulse-dot 1s infinite;
+        }
+        .dot.connected { background: #00ff00; }
+        .dot.error     { background: #ff4444; animation: none; }
+        @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+        /* Controls */
+        #controls {
+            position: fixed; bottom: 20px; left: 50%;
+            transform: translateX(-50%);
+            display: flex; gap: 12px; z-index: 100;
+        }
+        .btn {
+            width: 52px; height: 52px; border-radius: 50%; border: none;
+            background: linear-gradient(135deg, rgba(0,212,255,0.2), rgba(123,44,191,0.2));
+            backdrop-filter: blur(10px);
+            color: #fff; font-size: 20px; cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .btn:hover  { transform: scale(1.15); background: linear-gradient(135deg, rgba(0,212,255,0.35), rgba(123,44,191,0.35)); }
+        .btn:active { transform: scale(0.95); }
+
+        /* Mobile keyboard */
+        #mobile-keys {
+            position: fixed; bottom: 85px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(26,26,46,0.97);
+            backdrop-filter: blur(10px);
+            border-radius: 15px; padding: 10px;
+            display: none; flex-wrap: wrap; gap: 7px;
+            z-index: 100; max-width: 95vw; justify-content: center;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+        }
+        .key {
+            padding: 8px 13px;
+            border: 1px solid rgba(255,255,255,0.1);
+            background: rgba(255,255,255,0.05);
+            color: #fff; border-radius: 8px; font-size: 13px;
+            cursor: pointer; transition: all 0.15s;
+        }
+        .key:hover { background: rgba(0,212,255,0.2); border-color: #00d4ff; }
+
+        /* Toast */
+        .toast {
+            position: fixed; top: 75px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,212,255,0.9); color: #000;
+            padding: 10px 22px; border-radius: 20px;
+            font-size: 13px; z-index: 200;
+            opacity: 0; transition: opacity 0.3s; pointer-events: none;
+        }
+        .toast.show { opacity: 1; }
+
+        @media (max-width: 768px) {
+            #mobile-keys { display: flex; }
+            #controls    { bottom: 155px; }
+        }
+    </style>
+
+    <script type="module" crossorigin="anonymous">
+        import RFB from './core/rfb.js';
+
+        let rfb;
+        let desktopName = '';
+
+        const statusDot  = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const loading    = document.getElementById('loading');
+        const subtitle   = document.querySelector('.subtitle');
+
+        function setStatus(text, state) {
+            statusText.textContent = text;
+            statusDot.className = 'dot' + (state ? ' ' + state : '');
+            if (subtitle) subtitle.textContent = text;
+        }
+
+        function connectedToServer(e) {
+            loading.classList.add('hidden');
+            setStatus('Connected' + (desktopName ? ' — ' + desktopName : ''), 'connected');
+            rfb.scaleViewport = true;
+            rfb.resizeSession = true;
+        }
+
+        function disconnectedFromServer(e) {
+            loading.classList.remove('hidden');
+            setStatus(e.detail.clean ? 'Disconnected. Reconnecting...' : 'Connection lost. Retrying...', 'error');
+        }
+
+        function credentialsAreRequired(e) {
+            const password = prompt('VNC password (leave blank if none):') || '';
+            rfb.sendCredentials({ password });
+        }
+
+        function updateDesktopName(e) {
+            desktopName = e.detail.name;
+            if (rfb) setStatus('Connected — ' + desktopName, 'connected');
+        }
+
+        // Helper from original vnc_lite.html
+        function readQueryVariable(name, defaultValue) {
+            const re = new RegExp('.*[?&]' + name + '=([^&#]*)');
+            const match = document.location.href.match(re);
+            return match ? decodeURIComponent(match[1]) : defaultValue;
+        }
+
+        // Build WebSocket URL — same logic as working vnc_lite.html
+        const host     = readQueryVariable('host', window.location.hostname);
+        const port     = readQueryVariable('port', window.location.port);
+        const password = readQueryVariable('password', '');
+        const path     = readQueryVariable('path', 'websockify');
+
+        let url = (window.location.protocol === 'https:' ? 'wss' : 'ws') + '://' + host;
+        if (port) url += ':' + port;
+        url += '/' + path;
+
+        setStatus('Connecting to ' + host + '…');
+
+        rfb = new RFB(document.getElementById('screen'), url, {
+            credentials: { password },
+            reconnect: true,
+            reconnectDelay: 2000,
+        });
+
+        rfb.addEventListener('connect',              connectedToServer);
+        rfb.addEventListener('disconnect',           disconnectedFromServer);
+        rfb.addEventListener('credentialsrequired',  credentialsAreRequired);
+        rfb.addEventListener('desktopname',          updateDesktopName);
+
+        rfb.viewOnly       = readQueryVariable('view_only', false);
+        rfb.scaleViewport  = readQueryVariable('scale', true);
+
+        // Expose controls to window for onclick handlers
+        window._rfb = () => rfb;
+
+        window.sendCtrlAltDel = () => { if (rfb) { rfb.sendCtrlAltDel(); showToast('Ctrl+Alt+Del sent'); } };
+        window.doRefresh      = () => { if (rfb) rfb.disconnect(); setTimeout(() => location.reload(), 1000); };
+        window.toggleFullscreen = () => {
+            if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+            else document.exitFullscreen();
+        };
+        window.toggleKeyboard = () => {
+            const kb = document.getElementById('mobile-keys');
+            kb.style.display = kb.style.display === 'flex' ? 'none' : 'flex';
+        };
+        window.sendKey = (key) => { if (rfb) rfb.sendKey(key); };
+        window.copyUrl = () => {
+            navigator.clipboard.writeText(window.location.href)
+                .then(() => showToast('URL copied!'))
+                .catch(() => {});
+        };
+
+        document.addEventListener('paste', (e) => {
+            const text = e.clipboardData.getData('text');
+            if (rfb && text) rfb.clipboardPaste(text);
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'F11') { window.toggleFullscreen(); e.preventDefault(); }
+        });
+
+        window.addEventListener('resize', () => { if (rfb) rfb.scaleViewport = true; });
+    </script>
+</head>
+<body>
+    <div id="loading">
+        <div class="logo">🖥️</div>
+        <div class="title">Cloud Linux GUI</div>
+        <div class="subtitle">Establishing secure connection...</div>
+        <div class="spinner"></div>
+    </div>
+
+    <div id="screen"></div>
+
+    <div id="status-bar">
+        <span class="dot" id="status-dot"></span>
+        <span id="status-text">Connecting...</span>
+        <button class="btn" onclick="copyUrl()" style="width:30px;height:30px;font-size:13px;flex-shrink:0;">📋</button>
+    </div>
+
+    <div id="controls">
+        <button class="btn" onclick="toggleFullscreen()"  title="Fullscreen">⛶</button>
+        <button class="btn" onclick="sendCtrlAltDel()"    title="Ctrl+Alt+Del">⌨️</button>
+        <button class="btn" onclick="toggleKeyboard()"    title="Toggle Keys">🔣</button>
+        <button class="btn" onclick="doRefresh()"         title="Reconnect">🔄</button>
+    </div>
+
+    <div id="mobile-keys">
+        <button class="key" onclick="sendKey('Escape')">ESC</button>
+        <button class="key" onclick="sendKey('Tab')">TAB</button>
+        <button class="key" onclick="sendKey('Control_L')">CTRL</button>
+        <button class="key" onclick="sendKey('Alt_L')">ALT</button>
+        <button class="key" onclick="sendKey('Shift_L')">SHIFT</button>
+        <button class="key" onclick="sendKey('Super_L')">WIN</button>
+        <button class="key" onclick="sendKey('Enter')">ENTER</button>
+        <button class="key" onclick="sendKey('BackSpace')">⌫</button>
+        <button class="key" onclick="sendKey('ArrowUp')">↑</button>
+        <button class="key" onclick="sendKey('ArrowDown')">↓</button>
+        <button class="key" onclick="sendKey('ArrowLeft')">←</button>
+        <button class="key" onclick="sendKey('ArrowRight')">→</button>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 2000);
+        }
+    </script>
+</body>
+</html>
