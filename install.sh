@@ -5,8 +5,6 @@
 # Full Linux Desktop with GUI accessible from any browser via Cloudflare Tunnel
 ###############################################################################
 
-set -e
-
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -37,6 +35,17 @@ print_success() {
 
 print_error() {
     echo -e "${RED}[✗] $1${NC}"
+}
+
+# Kill all existing services
+cleanup_services() {
+    print_step "Cleaning up existing services..."
+    pkill -9 -f "Xvfb" 2>/dev/null || true
+    pkill -9 -f "vncserver" 2>/dev/null || true
+    pkill -9 -f "tigervnc" 2>/dev/null || true
+    pkill -9 -f "websockify" 2>/dev/null || true
+    pkill -9 -f "cloudflared" 2>/dev/null || true
+    sleep 2
 }
 
 # Detect OS
@@ -78,11 +87,6 @@ install_dependencies() {
         sudo yum install -y \
             xfce4-session dbus-x11 \
             tigervnc-server \
-            websockify \
-            curl wget git nano vim 2>/dev/null || true
-    elif command -v apk &> /dev/null; then
-        sudo apk add \
-            xfce4 dbus-x11 \
             websockify \
             curl wget git nano vim 2>/dev/null || true
     fi
@@ -504,9 +508,8 @@ VNC_EOF
 
     chmod +x ~/.vnc/xstartup
 
-    # Create VNC password file (empty password for no auth)
+    # Create VNC password file
     mkdir -p ~/.vnc
-    # Generate password file using vncpasswd
     (echo ""; echo "") | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
     chmod 600 ~/.vnc/passwd
 
@@ -517,59 +520,49 @@ VNC_EOF
 start_services() {
     print_step "Starting VNC server..."
 
-    # Kill existing
-    pkill -9 -f "Xvfb.*:1" 2>/dev/null || true
-    pkill -9 -f "vncserver.*:1" 2>/dev/null || true
-    pkill -9 -f "tigervnc.*:1" 2>/dev/null || true
-    sleep 2
+    # Kill ALL existing services first
+    cleanup_services
 
     # Start Xvfb
-    export DISPLAY=:1
-    Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+    export DISPLAY=:99
+    Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
     sleep 3
 
-    if ! pgrep -f "Xvfb :1" > /dev/null; then
-        print_error "Failed to start Xvfb"
-        exit 1
+    if ! pgrep -f "Xvfb :99" > /dev/null; then
+        # Try :1 if :99 fails
+        export DISPLAY=:1
+        Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+        sleep 3
+        
+        if ! pgrep -f "Xvfb :1" > /dev/null; then
+            print_error "Failed to start Xvfb"
+            exit 1
+        fi
     fi
 
-    # Start VNC with nohup in background
-    nohup tigervncserver :1 \
+    # Start VNC
+    export DISPLAY=:99
+    tigervncserver :1 \
         -geometry 1920x1080 \
         -depth 24 \
         -xstartup ~/.vnc/xstartup \
         -localhost no \
         -rfbport $VNC_PORT \
-        > /tmp/vnc.log 2>&1 & 
-
-    # Alternative: try vncserver if tigervnc fails
-    if ! pgrep -f "vncserver.*:1" > /dev/null; then
-        nohup vncserver :1 \
-            -geometry 1920x1080 \
-            -depth 24 \
-            -xstartup ~/.vnc/xstartup \
-            -localhost no \
-            -rfbport $VNC_PORT \
-            > /tmp/vnc.log 2>&1 &
-    fi
+        > /tmp/vnc.log 2>&1 &
 
     sleep 3
-    
-    if pgrep -f "vncserver.*:1" > /dev/null || pgrep -f "tigervnc.*:1" > /dev/null; then
+
+    if pgrep -f "vncserver" > /dev/null || pgrep -f "tigervnc" > /dev/null; then
         print_success "VNC server started on :1 (port $VNC_PORT)"
     else
         print_error "VNC server failed to start"
         cat /tmp/vnc.log 2>/dev/null
-        exit 1
     fi
 }
 
 # Start noVNC
 start_novnc() {
     print_step "Starting noVNC..."
-
-    pkill -f "websockify.*$NOVNC_PORT" 2>/dev/null || true
-    sleep 1
 
     cd "$NOVNC_DIR"
 
@@ -582,21 +575,17 @@ start_novnc() {
 
     sleep 3
 
-    if pgrep -f "websockify.*$NOVNC_PORT" > /dev/null; then
+    if pgrep -f "websockify" > /dev/null; then
         print_success "noVNC started on port $NOVNC_PORT"
     else
         print_error "noVNC failed to start"
         cat /tmp/novnc.log 2>/dev/null
-        exit 1
     fi
 }
 
 # Start Cloudflare Tunnel
 start_tunnel() {
     print_step "Starting Cloudflare Tunnel..."
-
-    pkill -f "cloudflared tunnel" 2>/dev/null || true
-    sleep 1
 
     nohup cloudflared tunnel --url http://localhost:$NOVNC_PORT \
         --logfile /tmp/cloudflared.log \
@@ -649,19 +638,20 @@ NOVNC_PORT=6080
 case "$1" in
     start)
         echo "Starting services..."
-        export DISPLAY=:1
-
-        # Kill existing
-        pkill -9 -f "Xvfb.*:1" 2>/dev/null || true
-        pkill -9 -f "vncserver.*:1" 2>/dev/null || true
+        
+        # Kill all existing
+        pkill -9 -f "Xvfb" 2>/dev/null || true
+        pkill -9 -f "vncserver" 2>/dev/null || true
+        pkill -9 -f "websockify" 2>/dev/null || true
+        pkill -9 -f "cloudflared" 2>/dev/null || true
         sleep 2
 
-        # Start Xvfb
-        Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+        export DISPLAY=:99
+        Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
         sleep 3
 
-        # Setup xstartup if missing
-        [ -f ~/.vnc/xstartup ] || (mkdir -p ~/.vnc && cat > ~/.vnc/xstartup << 'VNC'
+        mkdir -p ~/.vnc
+        [ -f ~/.vnc/xstartup ] || (cat > ~/.vnc/xstartup << 'VNC'
 #!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
@@ -672,16 +662,13 @@ chmod +x ~/.vnc/xstartup
 (echo ""; echo "") | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
 chmod 600 ~/.vnc/passwd)
 
-        # Start VNC with nohup
-        nohup tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup -localhost no -rfbport $VNC_PORT > /tmp/vnc.log 2>&1 &
+        tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup -localhost no -rfbport $VNC_PORT > /tmp/vnc.log 2>&1 &
         sleep 3
 
-        # Start noVNC
         cd "$SCRIPT_DIR/noVNC"
         nohup websockify --web="$SCRIPT_DIR/noVNC" --vnc="localhost:$VNC_PORT" --prefer-js=true $NOVNC_PORT > /tmp/novnc.log 2>&1 &
         sleep 3
 
-        # Start tunnel
         nohup cloudflared tunnel --url http://localhost:$NOVNC_PORT --logfile /tmp/cloudflared.log > /tmp/tunnel.log 2>&1 &
         sleep 10
 
@@ -696,9 +683,9 @@ chmod 600 ~/.vnc/passwd)
         ;;
     status)
         echo "=== Services Status ==="
-        pgrep -f "Xvfb :1" > /dev/null && echo "Xvfb: Running" || echo "Xvfb: Stopped"
-        pgrep -f "vncserver.*:1" > /dev/null && echo "VNC: Running" || echo "VNC: Stopped"
-        pgrep -f "websockify.*$NOVNC_PORT" > /dev/null && echo "noVNC: Running" || echo "noVNC: Stopped"
+        pgrep -f "Xvfb" > /dev/null && echo "Xvfb: Running" || echo "Xvfb: Stopped"
+        pgrep -f "vncserver" > /dev/null && echo "VNC: Running" || echo "VNC: Stopped"
+        pgrep -f "websockify" > /dev/null && echo "noVNC: Running" || echo "noVNC: Stopped"
         pgrep -f "cloudflared" > /dev/null && echo "Cloudflare: Running" || echo "Cloudflare: Stopped"
         ;;
 esac
@@ -731,13 +718,13 @@ display_status() {
     echo -e "   • View URL: ${BLUE}cat $SCRIPT_DIR/tunnel_url.txt${NC}"
     echo -e "   • Restart: ${BLUE}$SCRIPT_DIR/tunnel.sh start${NC}"
     echo -e "   • Stop: ${BLUE}$SCRIPT_DIR/tunnel.sh stop${NC}"
-    echo -e "   • Status: ${BLUE}$SCRIPT_DIR/tunnel.sh status${NC}"
     echo ""
 }
 
 main() {
     print_header
     detect_os
+    cleanup_services
     install_dependencies
     install_cloudflared
     install_novnc
