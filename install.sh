@@ -4,7 +4,6 @@
 # Cloud Linux GUI - One-Command Installation
 # Full Linux Desktop with GUI accessible from any browser via Cloudflare Tunnel
 ###############################################################################
-
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -29,6 +28,7 @@ print_step() {
     echo -e "${YELLOW}[*] $1${NC}"
 }
 
+
 print_success() {
     echo -e "${GREEN}[✓] $1${NC}"
 }
@@ -37,15 +37,21 @@ print_error() {
     echo -e "${RED}[✗] $1${NC}"
 }
 
-# Kill all existing services
-cleanup_services() {
-    print_step "Cleaning up existing services..."
-    pkill -9 -f "Xvfb" 2>/dev/null || true
-    pkill -9 -f "vncserver" 2>/dev/null || true
-    pkill -9 -f "tigervnc" 2>/dev/null || true
-    pkill -9 -f "websockify" 2>/dev/null || true
-    pkill -9 -f "cloudflared" 2>/dev/null || true
-    sleep 2
+# Find available display
+find_free_display() {
+    for i in $(seq 99 -1 10); do
+        if ! pgrep -f "Xvfb :$i" > /dev/null && [ ! -S "/tmp/.X11-unix/X$i" ]; then
+            echo "$i"
+            return 0
+        fi
+    done
+    for i in $(seq 1 9); do
+        if ! pgrep -f "Xvfb :$i" > /dev/null && [ ! -S "/tmp/.X11-unix/X$i" ]; then
+            echo "$i"
+            return 0
+        fi
+    done
+    echo "1"
 }
 
 # Detect OS
@@ -65,10 +71,10 @@ detect_os() {
     print_success "Detected: $OS $VER"
 }
 
+
 # Install required packages
 install_dependencies() {
     print_step "Installing dependencies..."
-
     if command -v apt-get &> /dev/null; then
         sudo apt-get update -qq 2>/dev/null || true
         sudo apt-get install -y \
@@ -113,6 +119,7 @@ install_cloudflared() {
 
     CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CLOUDFLARED_ARCH}"
 
+
     curl -sL "$CLOUDFLARED_URL" -o /tmp/cloudflared 2>/dev/null || wget -q "$CLOUDFLARED_URL" -O /tmp/cloudflared
 
     if [ -f /tmp/cloudflared ]; then
@@ -128,6 +135,7 @@ install_cloudflared() {
 # Install noVNC from GitHub
 install_novnc() {
     print_step "Installing noVNC from GitHub..."
+
 
     sudo mkdir -p "$NOVNC_DIR"
 
@@ -152,10 +160,9 @@ install_novnc() {
     fi
 }
 
-# Create custom vnc.html with proper connection
+# Create custom vnc.html
 create_vnc_page() {
     print_step "Creating VNC page..."
-
     sudo tee "$NOVNC_DIR/vnc.html" > /dev/null << 'VNC_EOF'
 <!DOCTYPE html>
 <html lang="en">
@@ -322,23 +329,18 @@ create_vnc_page() {
         <div class="subtitle">Establishing secure connection...</div>
         <div class="spinner"></div>
     </div>
-
     <div id="screen" tabindex="0"></div>
-
     <div id="url-bar">
         <span class="dot"></span>
         <span id="current-url">Connecting...</span>
         <button class="btn" onclick="copyUrl()" style="width:35px;height:35px;font-size:14px;">📋</button>
     </div>
-
     <div id="controls">
         <button class="btn" onclick="toggleFullscreen()" title="Fullscreen">⛶</button>
         <button class="btn" onclick="sendCtrlAltDel()" title="Ctrl+Alt+Del">⌨️</button>
         <button class="btn" onclick="toggleKeyboard()" title="Toggle Keyboard">⌨️</button>
         <button class="btn" onclick="refresh()" title="Refresh">🔄</button>
-        <button class="btn" onclick="showKeyboard()" title="Keyboard">⌨️</button>
     </div>
-
     <div id="mobile-keys">
         <button class="key" onclick="sendKey('Escape')">ESC</button>
         <button class="key" onclick="sendKey('Tab')">TAB</button>
@@ -352,12 +354,9 @@ create_vnc_page() {
         <button class="key" onclick="sendKey('ArrowLeft')">←</button>
         <button class="key" onclick="sendKey('ArrowRight')">→</button>
     </div>
-
     <div id="toast" class="toast">Copied!</div>
-
     <script type="module">
         import RFB from './core/rfb.js';
-
         let rfb;
         let connected = false;
 
@@ -367,41 +366,36 @@ create_vnc_page() {
             return url;
         }
 
+
         function connect() {
             const screen = document.getElementById('screen');
             const host = window.location.hostname;
             const port = window.location.port || (window.location.protocol === 'https:' ? 443 : 80);
-
             try {
                 const url = window.location.protocol === 'https:'
                     ? `wss://${host}:${port}/`
                     : `ws://${host}:${port}/`;
-
                 rfb = new RFB(screen, url, {
                     credentials: { password: '' },
                     reconnect: true,
                     reconnectDelay: 1000,
                     maxReconnectAttempts: 10
                 });
-
                 rfb.addEventListener('connect', () => {
                     connected = true;
                     document.getElementById('loading').classList.add('hidden');
                     document.querySelectorAll('#controls .btn')[3].classList.add('connected');
                 });
-
                 rfb.addEventListener('disconnect', () => {
                     connected = false;
                     document.getElementById('loading').classList.remove('hidden');
                     document.querySelectorAll('#controls .btn')[3].classList.remove('connected');
                 });
-
                 rfb.addEventListener('clipboard', (e) => {
                     navigator.clipboard.writeText(e.detail.text).then(() => {
-                        showToast('Copied to clipboard!');
+                        showToast('Copied!');
                     }).catch(() => {});
                 });
-
             } catch (e) {
                 console.error('Connection error:', e);
                 document.querySelector('.subtitle').textContent = 'Connection failed. Retrying...';
@@ -427,10 +421,6 @@ create_vnc_page() {
         function toggleKeyboard() {
             const kb = document.getElementById('mobile-keys');
             kb.style.display = kb.style.display === 'none' ? 'flex' : 'none';
-        }
-
-        function showKeyboard() {
-            document.getElementById('mobile-keys').style.display = 'flex';
         }
 
         function sendKey(key) {
@@ -466,6 +456,7 @@ create_vnc_page() {
             }
         });
 
+
         window.addEventListener('load', () => {
             getCurrentURL();
             connect();
@@ -474,7 +465,6 @@ create_vnc_page() {
         window.addEventListener('resize', () => {
             if (rfb && connected) rfb.resize();
         });
-
         document.addEventListener('keydown', (e) => {
             if (e.key === 'F11') {
                 toggleFullscreen();
@@ -494,8 +484,6 @@ setup_vnc() {
     print_step "Setting up VNC server..."
 
     mkdir -p ~/.vnc
-
-    # Create xstartup with proper XFCE4 startup
     cat > ~/.vnc/xstartup << 'VNC_EOF'
 #!/bin/sh
 unset SESSION_MANAGER
@@ -505,14 +493,9 @@ unset XDG_RUNTIME_DIR
 dbus-launch --exit-with-session startxfce4 &
 exec startxfce4
 VNC_EOF
-
     chmod +x ~/.vnc/xstartup
-
-    # Create VNC password file
-    mkdir -p ~/.vnc
     (echo ""; echo "") | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
     chmod 600 ~/.vnc/passwd
-
     print_success "VNC configured"
 }
 
@@ -520,28 +503,22 @@ VNC_EOF
 start_services() {
     print_step "Starting VNC server..."
 
-    # Kill ALL existing services first
-    cleanup_services
+    # Find available display
+    XVNC_DISPLAY=$(find_free_display)
+    print_step "Using display :$XVNC_DISPLAY"
 
     # Start Xvfb
-    export DISPLAY=:99
-    Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+    export DISPLAY=:$XVNC_DISPLAY
+    Xvfb :$XVNC_DISPLAY -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
     sleep 3
 
-    if ! pgrep -f "Xvfb :99" > /dev/null; then
-        # Try :1 if :99 fails
-        export DISPLAY=:1
-        Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
-        sleep 3
-        
-        if ! pgrep -f "Xvfb :1" > /dev/null; then
-            print_error "Failed to start Xvfb"
-            exit 1
-        fi
+    if ! pgrep -f "Xvfb :$XVNC_DISPLAY" > /dev/null; then
+        print_error "Failed to start Xvfb"
+        exit 1
     fi
+    print_success "Xvfb started on display :$XVNC_DISPLAY"
 
     # Start VNC
-    export DISPLAY=:99
     tigervncserver :1 \
         -geometry 1920x1080 \
         -depth 24 \
@@ -565,27 +542,25 @@ start_novnc() {
     print_step "Starting noVNC..."
 
     cd "$NOVNC_DIR"
-
     nohup websockify \
         --web="$NOVNC_DIR" \
         --vnc="localhost:$VNC_PORT" \
         --prefer-js=true \
         $NOVNC_PORT \
         > /tmp/novnc.log 2>&1 &
-
     sleep 3
 
     if pgrep -f "websockify" > /dev/null; then
         print_success "noVNC started on port $NOVNC_PORT"
     else
         print_error "noVNC failed to start"
-        cat /tmp/novnc.log 2>/dev/null
     fi
 }
 
 # Start Cloudflare Tunnel
 start_tunnel() {
     print_step "Starting Cloudflare Tunnel..."
+
 
     nohup cloudflared tunnel --url http://localhost:$NOVNC_PORT \
         --logfile /tmp/cloudflared.log \
@@ -617,11 +592,9 @@ start_tunnel() {
         echo -e "   ${YELLOW}Click the URL above to access your Linux desktop${NC}"
         echo ""
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-
         echo "$TUNNEL_URL" > "$SCRIPT_DIR/tunnel_url.txt"
     else
         print_error "Failed to get tunnel URL"
-        cat /tmp/tunnel.log 2>/dev/null | tail -20
     fi
 }
 
@@ -638,18 +611,6 @@ NOVNC_PORT=6080
 case "$1" in
     start)
         echo "Starting services..."
-        
-        # Kill all existing
-        pkill -9 -f "Xvfb" 2>/dev/null || true
-        pkill -9 -f "vncserver" 2>/dev/null || true
-        pkill -9 -f "websockify" 2>/dev/null || true
-        pkill -9 -f "cloudflared" 2>/dev/null || true
-        sleep 2
-
-        export DISPLAY=:99
-        Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
-        sleep 3
-
         mkdir -p ~/.vnc
         [ -f ~/.vnc/xstartup ] || (cat > ~/.vnc/xstartup << 'VNC'
 #!/bin/sh
@@ -662,16 +623,15 @@ chmod +x ~/.vnc/xstartup
 (echo ""; echo "") | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
 chmod 600 ~/.vnc/passwd)
 
+        Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+        sleep 3
         tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup -localhost no -rfbport $VNC_PORT > /tmp/vnc.log 2>&1 &
         sleep 3
-
         cd "$SCRIPT_DIR/noVNC"
         nohup websockify --web="$SCRIPT_DIR/noVNC" --vnc="localhost:$VNC_PORT" --prefer-js=true $NOVNC_PORT > /tmp/novnc.log 2>&1 &
         sleep 3
-
         nohup cloudflared tunnel --url http://localhost:$NOVNC_PORT --logfile /tmp/cloudflared.log > /tmp/tunnel.log 2>&1 &
         sleep 10
-
         grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -1
         ;;
     stop)
@@ -680,13 +640,6 @@ chmod 600 ~/.vnc/passwd)
         ;;
     url)
         cat "$SCRIPT_DIR/tunnel_url.txt" 2>/dev/null || echo "Run 'tunnel.sh start' first"
-        ;;
-    status)
-        echo "=== Services Status ==="
-        pgrep -f "Xvfb" > /dev/null && echo "Xvfb: Running" || echo "Xvfb: Stopped"
-        pgrep -f "vncserver" > /dev/null && echo "VNC: Running" || echo "VNC: Stopped"
-        pgrep -f "websockify" > /dev/null && echo "noVNC: Running" || echo "noVNC: Stopped"
-        pgrep -f "cloudflared" > /dev/null && echo "Cloudflare: Running" || echo "Cloudflare: Stopped"
         ;;
 esac
 SCRIPT_EOF
@@ -712,19 +665,12 @@ display_status() {
         echo ""
         echo -e "   ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     fi
-
-    echo ""
-    echo -e "   ${YELLOW}Commands:${NC}"
-    echo -e "   • View URL: ${BLUE}cat $SCRIPT_DIR/tunnel_url.txt${NC}"
-    echo -e "   • Restart: ${BLUE}$SCRIPT_DIR/tunnel.sh start${NC}"
-    echo -e "   • Stop: ${BLUE}$SCRIPT_DIR/tunnel.sh stop${NC}"
     echo ""
 }
 
 main() {
     print_header
     detect_os
-    cleanup_services
     install_dependencies
     install_cloudflared
     install_novnc
