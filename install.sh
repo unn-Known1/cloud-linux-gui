@@ -31,11 +31,9 @@ print_step() {
     echo -e "${YELLOW}[*] $1${NC}"
 }
 
-
 print_success() {
     echo -e "${GREEN}[✓] $1${NC}"
 }
-
 
 print_error() {
     echo -e "${RED}[✗] $1${NC}"
@@ -61,7 +59,6 @@ detect_os() {
 # Install required packages
 install_dependencies() {
     print_step "Installing dependencies..."
-
 
     if command -v apt-get &> /dev/null; then
         sudo apt-get update -qq 2>/dev/null || true
@@ -97,7 +94,6 @@ install_dependencies() {
 install_cloudflared() {
     print_step "Installing Cloudflare Tunnel..."
 
-
     if command -v cloudflared &> /dev/null; then
         print_success "Cloudflared already installed"
         return
@@ -129,7 +125,6 @@ install_cloudflared() {
 install_novnc() {
     print_step "Installing noVNC from GitHub..."
 
-
     sudo mkdir -p "$NOVNC_DIR"
 
     if [ -d "$NOVNC_DIR/.git" ]; then
@@ -157,8 +152,6 @@ install_novnc() {
 create_vnc_page() {
     print_step "Creating VNC page..."
 
-
-    # Copy our custom vnc.html to noVNC directory (replacing the default)
     sudo tee "$NOVNC_DIR/vnc.html" > /dev/null << 'VNC_EOF'
 <!DOCTYPE html>
 <html lang="en">
@@ -328,7 +321,6 @@ create_vnc_page() {
 
     <div id="screen" tabindex="0"></div>
 
-
     <div id="url-bar">
         <span class="dot"></span>
         <span id="current-url">Connecting...</span>
@@ -359,13 +351,11 @@ create_vnc_page() {
 
     <div id="toast" class="toast">Copied!</div>
 
-    <!-- VNC Client -->
     <script type="module">
         import RFB from './core/rfb.js';
 
         let rfb;
         let connected = false;
-
 
         function getCurrentURL() {
             const url = window.location.href;
@@ -375,26 +365,20 @@ create_vnc_page() {
 
         function connect() {
             const screen = document.getElementById('screen');
-
-            // Connect to current host without /websockify path
-            // The websockify is at root, so we connect to /
             const host = window.location.hostname;
             const port = window.location.port || (window.location.protocol === 'https:' ? 443 : 80);
 
-
             try {
-                // Connect to websockify at root path (port 6080)
                 const url = window.location.protocol === 'https:'
                     ? `wss://${host}:${port}/`
                     : `ws://${host}:${port}/`;
 
                 rfb = new RFB(screen, url, {
-                    credentials: { password: '' },  // No password
+                    credentials: { password: '' },
                     reconnect: true,
                     reconnectDelay: 1000,
                     maxReconnectAttempts: 10
                 });
-
 
                 rfb.addEventListener('connect', () => {
                     connected = true;
@@ -402,20 +386,17 @@ create_vnc_page() {
                     document.querySelectorAll('#controls .btn')[3].classList.add('connected');
                 });
 
-
                 rfb.addEventListener('disconnect', () => {
                     connected = false;
                     document.getElementById('loading').classList.remove('hidden');
                     document.querySelectorAll('#controls .btn')[3].classList.remove('connected');
                 });
 
-
                 rfb.addEventListener('clipboard', (e) => {
                     navigator.clipboard.writeText(e.detail.text).then(() => {
                         showToast('Copied to clipboard!');
                     }).catch(() => {});
                 });
-
 
             } catch (e) {
                 console.error('Connection error:', e);
@@ -444,7 +425,6 @@ create_vnc_page() {
             kb.style.display = kb.style.display === 'none' ? 'flex' : 'none';
         }
 
-
         function showKeyboard() {
             document.getElementById('mobile-keys').style.display = 'flex';
         }
@@ -454,7 +434,6 @@ create_vnc_page() {
                 rfb.sendKey(key);
             }
         }
-
 
         function refresh() {
             if (rfb) {
@@ -483,17 +462,14 @@ create_vnc_page() {
             }
         });
 
-
         window.addEventListener('load', () => {
             getCurrentURL();
             connect();
         });
 
-
         window.addEventListener('resize', () => {
             if (rfb && connected) rfb.resize();
         });
-
 
         document.addEventListener('keydown', (e) => {
             if (e.key === 'F11') {
@@ -509,7 +485,7 @@ VNC_EOF
     print_success "VNC page created"
 }
 
-# Configure VNC with password
+# Configure VNC
 setup_vnc() {
     print_step "Setting up VNC server..."
 
@@ -522,16 +498,16 @@ unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 unset XDG_RUNTIME_DIR
 
-# Start D-Bus and XFCE4
 dbus-launch --exit-with-session startxfce4 &
 exec startxfce4
 VNC_EOF
 
     chmod +x ~/.vnc/xstartup
 
-    # Create VNC password (empty for no password)
+    # Create VNC password file (empty password for no auth)
     mkdir -p ~/.vnc
-    echo "" > ~/.vnc/passwd
+    # Generate password file using vncpasswd
+    (echo ""; echo "") | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
     chmod 600 ~/.vnc/passwd
 
     print_success "VNC configured"
@@ -540,7 +516,6 @@ VNC_EOF
 # Start services
 start_services() {
     print_step "Starting VNC server..."
-
 
     # Kill existing
     pkill -9 -f "Xvfb.*:1" 2>/dev/null || true
@@ -558,13 +533,35 @@ start_services() {
         exit 1
     fi
 
-    # Start VNC WITHOUT password requirement
-    tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup -localhost no -rfbport $VNC_PORT > /tmp/vnc.log 2>&1 || \
-    vncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup -localhost no -rfbport $VNC_PORT > /tmp/vnc.log 2>&1
+    # Start VNC with nohup in background
+    nohup tigervncserver :1 \
+        -geometry 1920x1080 \
+        -depth 24 \
+        -xstartup ~/.vnc/xstartup \
+        -localhost no \
+        -rfbport $VNC_PORT \
+        > /tmp/vnc.log 2>&1 & 
 
+    # Alternative: try vncserver if tigervnc fails
+    if ! pgrep -f "vncserver.*:1" > /dev/null; then
+        nohup vncserver :1 \
+            -geometry 1920x1080 \
+            -depth 24 \
+            -xstartup ~/.vnc/xstartup \
+            -localhost no \
+            -rfbport $VNC_PORT \
+            > /tmp/vnc.log 2>&1 &
+    fi
 
-    sleep 2
-    print_success "VNC server started on :1 (port $VNC_PORT)"
+    sleep 3
+    
+    if pgrep -f "vncserver.*:1" > /dev/null || pgrep -f "tigervnc.*:1" > /dev/null; then
+        print_success "VNC server started on :1 (port $VNC_PORT)"
+    else
+        print_error "VNC server failed to start"
+        cat /tmp/vnc.log 2>/dev/null
+        exit 1
+    fi
 }
 
 # Start noVNC
@@ -574,26 +571,23 @@ start_novnc() {
     pkill -f "websockify.*$NOVNC_PORT" 2>/dev/null || true
     sleep 1
 
-    # Start websockify to proxy VNC
-    # Using --vnc localhost:$VNC_PORT connects to VNC
-    # Serving from noVNC directory which has vnc.html
     cd "$NOVNC_DIR"
-
 
     nohup websockify \
         --web="$NOVNC_DIR" \
         --vnc="localhost:$VNC_PORT" \
         --prefer-js=true \
-        $NOVNC_PORT > /tmp/novnc.log 2>&1 &
+        $NOVNC_PORT \
+        > /tmp/novnc.log 2>&1 &
 
     sleep 3
 
-    # Verify noVNC is running
     if pgrep -f "websockify.*$NOVNC_PORT" > /dev/null; then
         print_success "noVNC started on port $NOVNC_PORT"
     else
         print_error "noVNC failed to start"
-        cat /tmp/novnc.log
+        cat /tmp/novnc.log 2>/dev/null
+        exit 1
     fi
 }
 
@@ -601,21 +595,20 @@ start_novnc() {
 start_tunnel() {
     print_step "Starting Cloudflare Tunnel..."
 
-
     pkill -f "cloudflared tunnel" 2>/dev/null || true
     sleep 1
 
-    # Start cloudflared tunnel to noVNC port
     nohup cloudflared tunnel --url http://localhost:$NOVNC_PORT \
         --logfile /tmp/cloudflared.log \
-        --metrics 0.0.0.0:9090 > /tmp/tunnel.log 2>&1 &
+        --metrics 0.0.0.0:9090 \
+        > /tmp/tunnel.log 2>&1 &
 
-    sleep 8
+    sleep 10
 
     TUNNEL_URL=""
     for i in {1..15}; do
-        if [ -f /tmp/tunnel.log ]; then
-            TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log 2>/dev/null | head -1)
+        if [ -f /tmp/cloudflared.log ]; then
+            TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -1)
             if [ -n "$TUNNEL_URL" ]; then
                 break
             fi
@@ -635,7 +628,6 @@ start_tunnel() {
         echo -e "   ${YELLOW}Click the URL above to access your Linux desktop${NC}"
         echo ""
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-
 
         echo "$TUNNEL_URL" > "$SCRIPT_DIR/tunnel_url.txt"
     else
@@ -676,24 +668,24 @@ unset DBUS_SESSION_BUS_ADDRESS
 dbus-launch --exit-with-session startxfce4 &
 exec startxfce4
 VNC
-chmod +x ~/.vnc/xstartup)
+chmod +x ~/.vnc/xstartup
+(echo ""; echo "") | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
+chmod 600 ~/.vnc/passwd)
 
-
-        # Start VNC
-        tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup -localhost no -rfbport $VNC_PORT > /tmp/vnc.log 2>&1 || \
-        vncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup -localhost no -rfbport $VNC_PORT > /tmp/vnc.log 2>&1
-        sleep 2
+        # Start VNC with nohup
+        nohup tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup -localhost no -rfbport $VNC_PORT > /tmp/vnc.log 2>&1 &
+        sleep 3
 
         # Start noVNC
         cd "$SCRIPT_DIR/noVNC"
-        websockify --web="$SCRIPT_DIR/noVNC" --vnc="localhost:$VNC_PORT" --prefer-js=true $NOVNC_PORT > /tmp/novnc.log 2>&1 &
-        sleep 2
+        nohup websockify --web="$SCRIPT_DIR/noVNC" --vnc="localhost:$VNC_PORT" --prefer-js=true $NOVNC_PORT > /tmp/novnc.log 2>&1 &
+        sleep 3
 
         # Start tunnel
-        cloudflared tunnel --url http://localhost:$NOVNC_PORT --logfile /tmp/cloudflared.log > /tmp/tunnel.log 2>&1 &
-        sleep 8
+        nohup cloudflared tunnel --url http://localhost:$NOVNC_PORT --logfile /tmp/cloudflared.log > /tmp/tunnel.log 2>&1 &
+        sleep 10
 
-        grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log 2>/dev/null | head -1
+        grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -1
         ;;
     stop)
         pkill -9 -f "cloudflared|vncserver|Xvfb|websockify" 2>/dev/null
