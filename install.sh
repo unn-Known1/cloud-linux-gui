@@ -271,23 +271,26 @@ VNC_EOF
 start_services() {
     print_step "Starting VNC server..."
 
-    # Kill existing
-    pkill -f "vncserver" 2>/dev/null || true
-    pkill -f "Xvfb" 2>/dev/null || true
-    sleep 1
+    # Kill existing processes more aggressively
+    pkill -9 -f "Xvfb.*:1" 2>/dev/null || true
+    pkill -9 -f "vncserver.*:1" 2>/dev/null || true
+    pkill -9 -f "tigervnc.*:1" 2>/dev/null || true
+    sleep 2
 
     # Start Xvfb
     export DISPLAY=:1
-    Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
-    sleep 2
+    Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+    sleep 3
+
+    # Verify Xvfb is running
+    if ! pgrep -f "Xvfb :1" > /dev/null; then
+        print_error "Failed to start Xvfb"
+        exit 1
+    fi
 
     # Start VNC
-    vncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup 2>/dev/null || \
-    tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup 2>/dev/null || {
-        # Fallback: just start with basic xstartup
-        vncserver :1 -geometry 1920x1080 -depth 24 2>/dev/null || \
-        tigervncserver :1 -geometry 1920x1080 -depth 24
-    }
+    tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup > /tmp/vnc.log 2>&1 || \
+    vncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup > /tmp/vnc.log 2>&1
     sleep 2
 
     print_success "VNC server started on :1 (port 5901)"
@@ -372,6 +375,11 @@ case "$1" in
     start)
         echo "Starting services..."
         export DISPLAY=:1
+        pkill -9 -f "Xvfb.*:1" 2>/dev/null || true
+        pkill -9 -f "vncserver.*:1" 2>/dev/null || true
+        sleep 2
+        Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+        sleep 2
         [ -f ~/.vnc/xstartup ] || (mkdir -p ~/.vnc && cat > ~/.vnc/xstartup << 'VNC'
 #!/bin/sh
 unset SESSION_MANAGER
@@ -380,9 +388,8 @@ dbus-launch --exit-with-session startxfce4 &
 exec startxfce4
 VNC
 chmod +x ~/.vnc/xstartup)
-        Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
-        sleep 2
-        vncserver :1 -geometry 1920x1080 -depth 24 2>/dev/null || tigervncserver :1 -geometry 1920x1080 -depth 24
+        tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup > /tmp/vnc.log 2>&1 || \
+        vncserver :1 -geometry 1920x1080 -depth 24 -xstartup ~/.vnc/xstartup > /tmp/vnc.log 2>&1
         sleep 2
         cd "$SCRIPT_DIR/noVNC"
         websockify --web="$SCRIPT_DIR/web" 6080 localhost:5901 > /tmp/novnc.log 2>&1 &
@@ -392,7 +399,7 @@ chmod +x ~/.vnc/xstartup)
         grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log 2>/dev/null | head -1
         ;;
     stop)
-        pkill -f "cloudflared|vncserver|Xvfb|websockify" 2>/dev/null
+        pkill -9 -f "cloudflared|vncserver|Xvfb|websockify" 2>/dev/null
         echo "All services stopped"
         ;;
     url)
