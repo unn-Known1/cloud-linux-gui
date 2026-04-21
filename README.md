@@ -4,11 +4,13 @@
 
 Deploy a complete Linux desktop environment with XFCE4 GUI that you can access from anywhere in the world via a Cloudflare Tunnel URL.
 
+
 ## ⚡ Quick Start
 
 ```bash
 curl -sL https://raw.githubusercontent.com/unn-known1/cloud-linux-gui/main/install.sh | bash
 ```
+
 
 That's it! You'll get a Cloudflare URL like `https://xxxx.trycloudflare.com` to access your full Linux desktop.
 
@@ -22,6 +24,7 @@ That's it! You'll get a Cloudflare URL like `https://xxxx.trycloudflare.com` to 
 - **📋 Clipboard Support** - Copy/paste between browser and desktop
 - **⛶ Fullscreen Mode** - Immersive full desktop experience
 - **🎨 Modern UI** - Beautiful gradient interface with loading animations
+
 
 ## 🔧 What You Get
 
@@ -55,6 +58,7 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
+
 ## 📖 Usage
 
 ### After Installation
@@ -68,154 +72,84 @@ https://xxxx.trycloudflare.com
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-### Managing the Service
+
+### Management Commands
 
 ```bash
 # View current tunnel URL
 cat /opt/cloud-linux-gui/tunnel_url.txt
 
-# Restart tunnel
-/opt/cloud-linux-gui/tunnel.sh restart
+# Restart all services
+/opt/cloud-linux-gui/tunnel.sh start
 
 # Stop all services
-pkill -f 'Xvfb|vncserver|novnc|cloudflared'
+/opt/cloud-linux-gui/tunnel.sh stop
 
-# Quick access (if installed)
-/usr/local/bin/cloud-linux
+# Check status
+/opt/cloud-linux-gui/tunnel.sh status
 ```
 
-## 🎮 Controls
+### Quick Actions (in browser)
 
-| Button | Function |
-|--------|----------|
-| ⛶ | Toggle fullscreen |
-| ⌨️ (1st) | Send Ctrl+Alt+Del |
-| ⌨️ (2nd) | Toggle mobile keyboard |
-| 🔄 | Refresh connection |
-| ⌨️ (3rd) | Show keyboard |
-
-### Mobile Keyboard Keys
-
-ESC | TAB | CTRL | ALT | SHIFT | ENTER | ⌫ | ↑↓←→
-
-### Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| F11 | Fullscreen |
-| Ctrl+Alt+Shift | Release mouse |
-
-## 🔐 Security
-
-- **Cloudflare Protected** - All traffic routes through Cloudflare's secure network
-- **No Port Forwarding** - No exposed ports on your machine
-- **Encrypted Connection** - HTTPS via Cloudflare Tunnel
-- **Self-Hosted** - Your data stays on your machine
+- **Fullscreen** - Click the ⛶ button or press F11
+- **Ctrl+Alt+Del** - Click the ⌨️ button
+- **Keyboard** - Mobile on-screen keyboard
+- **Refresh** - Reconnect to desktop
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Cloudflare                              │
-│                                                             │
-│   ┌──────────┐      ┌──────────────┐      ┌────────────┐  │
-│   │  Browser │ ───> │ trycloudflare│ ───> │ Your Server │  │
-│   │  (Any)   │      │    .com      │      │  (Cloudflare│  │
-│   └──────────┘      └──────────────┘      │   Tunnel)   │  │
-│                                           └──────┬───────┘  │
-│                                                  │          │
-│                                           ┌──────┴───────┐  │
-│                                           │              │  │
-│                                      ┌────┴────┐   ┌─────┴──┐  │
-│                                      │ noVNC   │   │  VNC   │  │
-│                                      │ (Web)   │   │Server  │  │
-│                                      └─────────┘   └────────┘  │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+│   Browser   │ ←──→ │ Cloudflare  │ ←──→ │   noVNC     │
+│   (Any!)    │ HTTPS│   Tunnel    │ HTTP │  + WebSocket│
+└─────────────┘      └─────────────┘      └──────┬──────┘
+                                                  │
+                                                  ▼
+                                           ┌─────────────┐
+                                           │  TigerVNC   │
+                                           │   Server    │
+                                           └──────┬──────┘
+                                                  │
+                                                  ▼
+                                           ┌─────────────┐
+                                           │    Xvfb     │
+                                           │  (Virtual)  │
+                                           └──────┬──────┘
+                                                  │
+                                                  ▼
+                                           ┌─────────────┐
+                                           │   XFCE4     │
+                                           │  Desktop    │
+                                           └─────────────┘
 ```
 
 ## 📋 Requirements
 
-- **OS**: Linux (Ubuntu, Debian, CentOS, Fedora, Alpine)
-- **Architecture**: x86_64, arm64, or armv7l
-- **Tools**: curl or wget (for installation)
-- **Root/Sudo**: Required for package installation
+- **OS**: Ubuntu 20.04+ / Debian 10+ / CentOS 8+
+- **RAM**: 1GB+ recommended
+- **Disk**: 5GB+ free space
+- **Internet**: Required for tunnel connection
 
-### Installed Packages
 
-- Xvfb (virtual framebuffer)
-- xfce4 (desktop environment)
-- tightvncserver or tigervnc (VNC server)
-- novnc (web-based VNC client)
-- cloudflared (Cloudflare Tunnel)
+## ⚠️ Important Notes
 
-## 🐛 Troubleshooting
+1. **Cloudflare Tunnel URL expires** when services are stopped. Restart services to get a new URL.
+2. **Public access** - The tunnel URL is public. Don't use for sensitive data without additional authentication.
+3. **Performance** - For best experience, use a machine with good network connectivity.
 
-### Installation Fails
 
-```bash
-# Check if running with sudo/root
-sudo bash -c "curl -sL https://raw.githubusercontent.com/unn-known1/cloud-linux-gui/main/install.sh | bash"
-```
+## 🔒 Security
 
-### No Tunnel URL
 
-```bash
-# Check tunnel logs
-cat /tmp/tunnel.log
+- All traffic is encrypted via HTTPS through Cloudflare
+- VNC traffic is tunneled securely
+- No VNC password required by default (access controlled by tunnel URL)
 
-# Restart tunnel manually
-/opt/cloud-linux-gui/tunnel.sh restart
-```
-
-### VNC Not Connecting
-
-```bash
-# Check if VNC is running
-ps aux | grep vnc
-
-# Restart VNC
-pkill -f vncserver
-vncserver :1 -geometry 1920x1080 -depth 24
-```
-
-### Port Already in Use
-
-```bash
-# Kill existing processes
-pkill -f 'Xvfb|vncserver|novnc|websockify|cloudflared'
-```
-
-## 📝 Customization
-
-### Change Resolution
-
-Edit `/root/.vnc/xstartup` and modify the `Xvfb` command:
-
-```bash
-Xvfb :1 -screen 0 1280x720x24 -ac +extension GLX +render -noreset &
-```
-
-### Change VNC Password
-
-```bash
-vncpasswd
-```
-
-### Different Desktop Environment
-
-Replace `startxfce4` in `~/.vnc/xstartup` with:
-- `startlxde` (LXDE)
-- `startplasma-x11` (KDE)
-- `gnome-session` (GNOME)
 
 ## 🤝 Contributing
 
-Contributions welcome! Please feel free to submit a Pull Request.
+Contributions welcome! Please open an issue or submit a PR.
 
 ## 📄 License
 
-MIT License - feel free to use, modify, and distribute.
-
----
-
-**Built with ❤️ for cloud computing, remote work, and accessibility**
+MIT License - feel free to use and modify.
