@@ -96,7 +96,6 @@ install_cloudflared() {
 install_novnc() {
     print_step "Installing noVNC from GitHub..."
     mkdir -p "$NOVNC_DIR"
-
     if [ -d "$NOVNC_DIR/.git" ]; then
         cd "$NOVNC_DIR" && git pull 2>/dev/null || true
     else
@@ -268,6 +267,7 @@ setup_vnc() {
     print_step "Setting up VNC server..."
     mkdir -p ~/.vnc
 
+
     cat > ~/.vnc/xstartup << 'VNC_EOF'
 #!/bin/sh
 unset SESSION_MANAGER
@@ -300,8 +300,10 @@ start_services() {
 
     rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
+
     XVFB_DISPLAY=:99
     export DISPLAY=$XVFB_DISPLAY
+
 
     Xvfb $XVFB_DISPLAY -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
     sleep 3
