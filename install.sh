@@ -80,7 +80,7 @@ install_cloudflared() {
     esac
 
     CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CLOUDFLARED_ARCH}"
-    curl -sLf "$CLOUDFLARED_URL" -o /tmp/cloudflared 2>/dev/null || \
+    curl -sL "$CLOUDFLARED_URL" -o /tmp/cloudflared 2>/dev/null || \
         wget -q "$CLOUDFLARED_URL" -O /tmp/cloudflared
 
     if [ -f /tmp/cloudflared ]; then
@@ -100,7 +100,7 @@ install_novnc() {
         cd "$NOVNC_DIR" && git pull 2>/dev/null || true
     else
         git clone --depth 1 https://github.com/novnc/noVNC.git "$NOVNC_DIR" 2>/dev/null || {
-            curl -sLf https://github.com/novnc/noVNC/archive/refs/heads/master.tar.gz -o /tmp/novnc.tar.gz
+            curl -sL https://github.com/novnc/noVNC/archive/refs/heads/master.tar.gz -o /tmp/novnc.tar.gz
             if [ -f /tmp/novnc.tar.gz ]; then
                 tar -xzf /tmp/novnc.tar.gz -C "$SCRIPT_DIR"
                 mv "$SCRIPT_DIR/noVNC-master" "$NOVNC_DIR"
@@ -186,7 +186,7 @@ create_vnc_page() {
     </div>
     <div id="toast" class="toast"></div>
 
-    <script type="module" crossorigin="anonymous">
+    <script type="module">
         import RFB from './core/rfb.js';
 
         let rfb;
@@ -204,8 +204,11 @@ create_vnc_page() {
             document.getElementById('current-url').textContent = window.location.href;
 
             try {
-                // Initialize RFB without unsupported reconnect options
-                rfb = new RFB(screen, url);
+                rfb = new RFB(screen, url, {
+                    credentials: { password: '' },
+                    reconnect: true,
+                    reconnectDelay: 2000,
+                });
 
                 rfb.addEventListener('connect', () => {
                     document.getElementById('loading').classList.add('hidden');
@@ -216,10 +219,7 @@ create_vnc_page() {
                 rfb.addEventListener('disconnect', (e) => {
                     document.getElementById('loading').classList.remove('hidden');
                     document.querySelector('.subtitle').textContent =
-                        (e.detail && e.detail.clean) ? 'Disconnected. Reconnecting...' : 'Connection lost. Retrying...';
-                    
-                    // Actually trigger the reconnect
-                    setTimeout(connect, 3000);
+                        e.detail.clean ? 'Disconnected. Reconnecting...' : 'Connection lost. Retrying...';
                 });
 
             } catch (e) {
@@ -229,19 +229,19 @@ create_vnc_page() {
             }
         }
 
-        window.toggleFullscreen = function() {
+        function toggleFullscreen() {
             if (!document.fullscreenElement) document.documentElement.requestFullscreen();
             else document.exitFullscreen();
-        };
+        }
 
-        window.sendCtrlAltDel = function() {
+        function sendCtrlAltDel() {
             if (rfb) { rfb.sendCtrlAltDel(); showToast('Ctrl+Alt+Del sent'); }
-        };
+        }
 
-        window.doRefresh = function() {
+        function doRefresh() {
             if (rfb) rfb.disconnect();
-            // Disconnect event will handle the reconnection automatically
-        };
+            setTimeout(connect, 1000);
+        }
 
         function showToast(msg) {
             const t = document.getElementById('toast');
@@ -250,8 +250,11 @@ create_vnc_page() {
             setTimeout(() => t.classList.remove('show'), 2000);
         }
 
-        // Initialize connection immediately
-        connect();
+        window.toggleFullscreen = toggleFullscreen;
+        window.sendCtrlAltDel  = sendCtrlAltDel;
+        window.doRefresh        = doRefresh;
+
+        window.addEventListener('load', connect);
     </script>
 </body>
 </html>
@@ -270,9 +273,13 @@ setup_vnc() {
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 unset XDG_RUNTIME_DIR
-exec dbus-launch --exit-with-session startxfce4
+dbus-launch --exit-with-session startxfce4 &
+exec startxfce4
 VNC_EOF
     chmod +x ~/.vnc/xstartup
+
+    printf '\n\n' | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
+    chmod 600 ~/.vnc/passwd
 
     print_success "VNC configured"
 }
@@ -293,13 +300,27 @@ start_services() {
 
     rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
+
+    XVFB_DISPLAY=:99
+    export DISPLAY=$XVFB_DISPLAY
+
+
+    Xvfb $XVFB_DISPLAY -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+    sleep 3
+
+    if ! pgrep -f "Xvfb $XVFB_DISPLAY" > /dev/null; then
+        print_error "Failed to start Xvfb"
+        exit 1
+    fi
+    print_success "Xvfb started on display $XVFB_DISPLAY"
+
     tigervncserver :1 \
         -geometry 1920x1080 \
         -depth 24 \
         -xstartup ~/.vnc/xstartup \
-        -localhost yes \
+        -localhost no \
         -rfbport $VNC_PORT \
-        -SecurityTypes None \
+        -rfbauth ~/.vnc/passwd \
         > /tmp/vnc.log 2>&1 || true
     sleep 3
 
@@ -395,13 +416,16 @@ case "$1" in
     start)
         kill_all
         rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+        export DISPLAY=:99
+        Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+        sleep 3
         tigervncserver :1 -geometry 1920x1080 -depth 24 \
-            -xstartup ~/.vnc/xstartup -localhost yes -rfbport $VNC_PORT \
-            -SecurityTypes None > /tmp/vnc.log 2>&1 || true
+            -xstartup ~/.vnc/xstartup -localhost no -rfbport $VNC_PORT \
+            -rfbauth ~/.vnc/passwd > /tmp/vnc.log 2>&1 || true
         sleep 2
-        nohup websockify --web="$SCRIPT_DIR/noVNC" --heartbeat=30 $NOVNC_PORT localhost:$VNC_PORT > /tmp/novnc.log 2>&1 &
+        websockify --web="$SCRIPT_DIR/noVNC" --heartbeat=30 $NOVNC_PORT localhost:$VNC_PORT > /tmp/novnc.log 2>&1 &
         sleep 2
-        nohup cloudflared tunnel --url http://localhost:$NOVNC_PORT --logfile /tmp/cloudflared.log > /tmp/tunnel.log 2>&1 &
+        cloudflared tunnel --url http://localhost:$NOVNC_PORT --logfile /tmp/cloudflared.log > /tmp/tunnel.log 2>&1 &
         sleep 15
         URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -1)
         [ -n "$URL" ] && echo "${URL}/vnc.html" || echo "Tunnel URL not found yet, check /tmp/cloudflared.log"
@@ -415,6 +439,7 @@ case "$1" in
         ;;
     status)
         echo "=== Service Status ==="
+        pgrep -f "Xvfb :99"        > /dev/null && echo "Xvfb:        Running" || echo "Xvfb:        Stopped"
         pgrep -f "Xtigervnc.*:1"   > /dev/null && echo "VNC:         Running" || echo "VNC:         Stopped"
         pgrep -f "websockify"       > /dev/null && echo "noVNC:       Running" || echo "noVNC:       Stopped"
         pgrep -f "cloudflared"      > /dev/null && echo "Cloudflare:  Running" || echo "Cloudflare:  Stopped"
@@ -450,10 +475,6 @@ display_status() {
 
 main() {
     print_header
-    if [ "$EUID" -ne 0 ]; then
-        print_error "Please run this script as root (sudo ./install.sh)"
-        exit 1
-    fi
     detect_os
     install_dependencies
     install_cloudflared
