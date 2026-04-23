@@ -297,7 +297,7 @@ start_services() {
         -geometry 1920x1080 \
         -depth 24 \
         -xstartup ~/.vnc/xstartup \
-        -localhost no \
+        -localhost yes \
         -rfbport $VNC_PORT \
         -SecurityTypes None \
         > /tmp/vnc.log 2>&1 || true
@@ -396,7 +396,7 @@ case "$1" in
         kill_all
         rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
         tigervncserver :1 -geometry 1920x1080 -depth 24 \
-            -xstartup ~/.vnc/xstartup -localhost no -rfbport $VNC_PORT \
+            -xstartup ~/.vnc/xstartup -localhost yes -rfbport $VNC_PORT \
             -SecurityTypes None > /tmp/vnc.log 2>&1 || true
         sleep 2
         nohup websockify --web="$SCRIPT_DIR/noVNC" --heartbeat=30 $NOVNC_PORT localhost:$VNC_PORT > /tmp/novnc.log 2>&1 &
