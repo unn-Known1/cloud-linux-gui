@@ -384,7 +384,7 @@ start_tunnel() {
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         echo -e "  ${BLUE}Access your Linux Desktop:${NC}"
-        echo -e "  ${GREEN}${TUNNEL_URL}/vnc.html${NC}"
+        echo -e "  ${GREEN}${TUNNEL_URL}/vnc_lite.html${NC}"
         echo ""
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     else
