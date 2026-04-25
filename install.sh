@@ -298,7 +298,9 @@ start_services() {
 
     kill_all
 
-    rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
+        rm -f /tmp/.X2-lock /tmp/.X11-unix/X2 2>/dev/null || true
+        sleep 1
 
 
     XVFB_DISPLAY=:99
@@ -415,7 +417,9 @@ kill_all() {
 case "$1" in
     start)
         kill_all
-        rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
+    rm -f /tmp/.X2-lock /tmp/.X11-unix/X2 2>/dev/null || true
+    sleep 1
         export DISPLAY=:99
         Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
         sleep 3
