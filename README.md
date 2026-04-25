@@ -8,7 +8,7 @@ Deploy a complete Linux desktop environment with XFCE4 GUI that you can access f
 ## ⚡ Quick Start
 
 ```bash
-curl -sL https://raw.githubusercontent.com/unn-known1/cloud-linux-gui/main/install.sh | bash
+curl -sL https://raw.githubusercontent.com/unn-known1/cloud-linux-gui/main/install.sh | sudo bash
 ```
 
 
