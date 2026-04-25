@@ -278,10 +278,30 @@ exec startxfce4
 VNC_EOF
     chmod +x ~/.vnc/xstartup
 
-    printf '\ncloudlinux\ncloudlinux\n' | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
+    # Generate secure random VNC password
+    # Use environment variable if set, otherwise generate a secure random password
+    if [ -n "$VNC_PASSWORD" ]; then
+        VNC_PASS="$VNC_PASSWORD"
+        print_info "Using VNC_PASSWORD from environment"
+    else
+        # Generate a secure random 12-character password using /dev/urandom
+        VNC_PASS=$(head -c 100 /dev/urandom | tr -dc 'A-Za-z0-9!@#$%' | head -c 12)
+        print_info "Generated secure random VNC password"
+    fi
+
+    # Set permissions for .vnc directory
+    mkdir -p ~/.vnc
+    chmod 700 ~/.vnc
+
+    # Create VNC password file
+    printf '\n%s\n%s\n' "$VNC_PASS" "$VNC_PASS" | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
     chmod 600 ~/.vnc/passwd
 
-    print_success "VNC configured"
+    print_success "VNC configured with secure password"
+    echo ""
+    print_info "IMPORTANT: Your VNC password is: $VNC_PASS"
+    print_info "Please save this password securely - it will not be shown again."
+    echo ""
 }
 
 kill_all() {
