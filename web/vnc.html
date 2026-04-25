@@ -238,7 +238,6 @@
         <button class="btn" onclick="sendCtrlAltDel()" title="Ctrl+Alt+Del">⌨️</button>
         <button class="btn" onclick="toggleKeyboard()" title="Toggle Keyboard">⌨️</button>
         <button class="btn" onclick="refresh()" title="Refresh">🔄</button>
-        <button class="btn" onclick="showKeyboard()" title="Keyboard">⌨️</button>
     </div>
 
     <div id="mobile-keys">
@@ -278,7 +277,9 @@
             const port = window.location.port || (window.location.protocol === 'https:' ? 443 : 80);
 
             try {
-                const url = `wss://${host}:${port}/websockify`;
+                const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const port = window.location.port || (window.location.protocol === 'https:' ? 443 : 80);
+            const url = `${proto}//${host}:${port}/websockify`;
                 rfb = new RFB(screen, url, {
                     credentials: { password: 'cloudlinux' },
                     reconnect: true,

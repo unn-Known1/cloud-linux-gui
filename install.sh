@@ -278,7 +278,7 @@ exec startxfce4
 VNC_EOF
     chmod +x ~/.vnc/xstartup
 
-    printf '\n\n' | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
+    printf '\ncloudlinux\ncloudlinux\n' | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
     chmod 600 ~/.vnc/passwd
 
     print_success "VNC configured"
