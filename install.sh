@@ -19,6 +19,8 @@ SCRIPT_DIR="/opt/cloud-linux-gui"
 NOVNC_DIR="$SCRIPT_DIR/noVNC"
 VNC_PORT=5901
 NOVNC_PORT=6080
+CLOUD_USER="cloudlinux"
+RUN_AS_USER="${RUN_AS_USER:-$CLOUD_USER}"
 
 print_header() {
     echo -e "\n${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
@@ -29,6 +31,7 @@ print_header() {
 print_step()    { echo -e "${YELLOW}[*] $1${NC}"; }
 print_success() { echo -e "${GREEN}[✓] $1${NC}"; }
 print_error()   { echo -e "${RED}[✗] $1${NC}"; }
+print_warning()  { echo -e "${YELLOW}[!] $1${NC}"; }
 
 detect_os() {
     print_step "Detecting system..."
@@ -263,12 +266,49 @@ VNC_EOF
     print_success "VNC page created"
 }
 
+create_service_user() {
+    print_step "Creating dedicated service user for security..."
+
+    # Check if running as root
+    if [ "$(id -u)" -eq 0 ]; then
+        # Create user if it doesn't exist
+        if ! id "$RUN_AS_USER" &>/dev/null; then
+            useradd -m -s /bin/bash "$RUN_AS_USER" 2>/dev/null || true
+            print_success "Created user: $RUN_AS_USER"
+        else
+            print_success "User $RUN_AS_USER already exists"
+        fi
+
+        # Add user to video group for X11/VNC
+        usermod -aG video,render,dialout "$RUN_AS_USER" 2>/dev/null || true
+
+        # Create directories and set permissions
+        mkdir -p /opt/cloud-linux-gui
+        chown -R "$RUN_AS_USER:$RUN_AS_USER" /opt/cloud-linux-gui 2>/dev/null || true
+
+        # Set HOME for the user
+        eval "echo ~$RUN_AS_USER" > /dev/null 2>/dev/null || true
+    else
+        print_warning "Not running as root - cannot create service user"
+        print_warning "Set RUN_AS_USER environment variable to specify a user"
+    fi
+}
+
 setup_vnc() {
     print_step "Setting up VNC server..."
-    mkdir -p ~/.vnc
+
+    # Set target home directory
+    if [ "$(id -u)" -eq 0 ] && [ "$RUN_AS_USER" != "root" ]; then
+        TARGET_HOME=$(eval "echo ~$RUN_AS_USER" 2>/dev/null || echo "/root")
+        VNC_HOME_DIR="$TARGET_HOME"
+    else
+        VNC_HOME_DIR="$HOME"
+    fi
+
+    mkdir -p "$VNC_HOME_DIR/.vnc"
 
 
-    cat > ~/.vnc/xstartup << 'VNC_EOF'
+    cat > "$VNC_HOME_DIR/.vnc/xstartup" << 'VNC_EOF'
 #!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
@@ -276,31 +316,31 @@ unset XDG_RUNTIME_DIR
 dbus-launch --exit-with-session startxfce4 &
 exec startxfce4
 VNC_EOF
-    chmod +x ~/.vnc/xstartup
+    chmod +x "$VNC_HOME_DIR/.vnc/xstartup"
 
     # Generate secure random VNC password
     # Use environment variable if set, otherwise generate a secure random password
     if [ -n "$VNC_PASSWORD" ]; then
         VNC_PASS="$VNC_PASSWORD"
-        print_info "Using VNC_PASSWORD from environment"
+        print_success "Using VNC_PASSWORD from environment"
     else
         # Generate a secure random 12-character password using /dev/urandom
         VNC_PASS=$(head -c 100 /dev/urandom | tr -dc 'A-Za-z0-9!@#$%' | head -c 12)
-        print_info "Generated secure random VNC password"
+        print_success "Generated secure random VNC password"
     fi
 
     # Set permissions for .vnc directory
-    mkdir -p ~/.vnc
-    chmod 700 ~/.vnc
+    mkdir -p "$VNC_HOME_DIR/.vnc"
+    chmod 700 "$VNC_HOME_DIR/.vnc"
 
     # Create VNC password file
-    printf '\n%s\n%s\n' "$VNC_PASS" "$VNC_PASS" | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || true
-    chmod 600 ~/.vnc/passwd
+    printf '\n%s\n%s\n' "$VNC_PASS" "$VNC_PASS" | vncpasswd -f > "$VNC_HOME_DIR/.vnc/passwd" 2>/dev/null || true
+    chmod 600 "$VNC_HOME_DIR/.vnc/passwd"
 
     print_success "VNC configured with secure password"
     echo ""
-    print_info "IMPORTANT: Your VNC password is: $VNC_PASS"
-    print_info "Please save this password securely - it will not be shown again."
+    print_warning "IMPORTANT: Your VNC password is: $VNC_PASS"
+    print_warning "Please save this password securely - it will not be shown again."
     echo ""
 }
 
@@ -318,16 +358,29 @@ start_services() {
 
     kill_all
 
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
-        rm -f /tmp/.X2-lock /tmp/.X11-unix/X2 2>/dev/null || true
-        sleep 1
-
+    rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
+    rm -f /tmp/.X2-lock /tmp/.X11-unix/X2 2>/dev/null || true
+    sleep 1
 
     XVFB_DISPLAY=:99
     export DISPLAY=$XVFB_DISPLAY
 
+    # Function to run command as non-root user if possible
+    run_as_user() {
+        if [ "$(id -u)" -eq 0 ] && [ "$RUN_AS_USER" != "root" ]; then
+            su - "$RUN_AS_USER" -c "export DISPLAY=$XVFB_DISPLAY; $1"
+        else
+            eval "$1"
+        fi
+    }
 
-    Xvfb $XVFB_DISPLAY -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+    # Start Xvfb
+    if [ "$(id -u)" -eq 0 ] && [ "$RUN_AS_USER" != "root" ]; then
+        # Run as non-root user
+        su - "$RUN_AS_USER" -c "Xvfb $XVFB_DISPLAY -screen 0 1920x1080x24 -ac +extension GLX +render -noreset" > /dev/null 2>&1 &
+    else
+        Xvfb $XVFB_DISPLAY -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+    fi
     sleep 3
 
     if ! pgrep -f "Xvfb $XVFB_DISPLAY" > /dev/null; then
@@ -336,14 +389,27 @@ rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
     fi
     print_success "Xvfb started on display $XVFB_DISPLAY"
 
-    tigervncserver :1 \
-        -geometry 1920x1080 \
-        -depth 24 \
-        -xstartup ~/.vnc/xstartup \
-        -localhost no \
-        -rfbport $VNC_PORT \
-        -rfbauth ~/.vnc/passwd \
-        > /tmp/vnc.log 2>&1 || true
+    # Set target home for VNC
+    if [ "$(id -u)" -eq 0 ] && [ "$RUN_AS_USER" != "root" ]; then
+        VNC_TARGET_HOME=$(eval "echo ~$RUN_AS_USER" 2>/dev/null || echo "/root")
+    else
+        VNC_TARGET_HOME="$HOME"
+    fi
+
+    # Start VNC server
+    if [ "$(id -u)" -eq 0 ] && [ "$RUN_AS_USER" != "root" ]; then
+        # Run as non-root user
+        su - "$RUN_AS_USER" -c "tigervncserver :1 -geometry 1920x1080 -depth 24 -xstartup $VNC_TARGET_HOME/.vnc/xstartup -localhost no -rfbport $VNC_PORT -rfbauth $VNC_TARGET_HOME/.vnc/passwd" > /tmp/vnc.log 2>&1 || true
+    else
+        tigervncserver :1 \
+            -geometry 1920x1080 \
+            -depth 24 \
+            -xstartup "$VNC_TARGET_HOME/.vnc/xstartup" \
+            -localhost no \
+            -rfbport $VNC_PORT \
+            -rfbauth "$VNC_TARGET_HOME/.vnc/passwd" \
+            > /tmp/vnc.log 2>&1 || true
+    fi
     sleep 3
 
     if ! pgrep -f "Xtigervnc.*:1" > /dev/null; then
