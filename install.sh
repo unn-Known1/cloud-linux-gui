@@ -56,12 +56,23 @@ install_dependencies() {
         apt-get install -y \
             xfce4 xfce4-goodies xorg dbus-x11 \
             tigervnc-standalone-server tigervnc-common \
+            xvfb x11-apps x11-utils \
             websockify \
             curl wget git nano vim \
             fonts-noto-cjk 2>/dev/null || true
     elif command -v yum &> /dev/null; then
         yum install -y \
-            xfce4-session dbus-x11 tigervnc-server websockify \
+            xfce4-session dbus-x11 tigervnc-server \
+            xorg-x11-server-Xvfb \
+            xorg-x11-apps xorg-x11-utils \
+            websockify \
+            curl wget git nano vim 2>/dev/null || true
+    elif command -v dnf &> /dev/null; then
+        dnf install -y \
+            xfce4-session dbus-x11 tigervnc-server \
+            xorg-x11-server-Xvfb \
+            xorg-x11-apps xorg-x11-utils \
+            websockify \
             curl wget git nano vim 2>/dev/null || true
     fi
     print_success "Dependencies installed"
