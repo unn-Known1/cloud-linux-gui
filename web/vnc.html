@@ -278,8 +278,7 @@
 
             try {
                 const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const port = window.location.port || (window.location.protocol === 'https:' ? 443 : 80);
-            const url = `${proto}//${host}:${port}/websockify`;
+                const url = `${proto}//${host}:${port}/websockify`;
                 rfb = new RFB(screen, url, {
                     credentials: { password: 'cloudlinux' },
                     reconnect: true,
