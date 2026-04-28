@@ -120,29 +120,51 @@ log "VNC password set: ${VNC_PASS}"
 step "Starting VNC server..."
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
 
+# Generate TLS certificate for encrypted VNC connections
+step "Generating TLS certificate..."
+CERT_DIR="/root/.vnc/certs"
+mkdir -p "${CERT_DIR}"
+chmod 700 "${CERT_DIR}"
+
+# Generate self-signed certificate if not exists
+if [ ! -f "${CERT_DIR}/server.crt" ] || [ ! -f "${CERT_DIR}/server.key" ]; then
+    openssl req -x509 -newkey rsa:4096 -keyout "${CERT_DIR}/server.key" -out "${CERT_DIR}/server.crt" \
+        -days 365 -nodes -subj "/CN=VNC Server/O=Cloud Linux GUI" 2>/dev/null
+    chmod 600 "${CERT_DIR}/server.key"
+    chmod 644 "${CERT_DIR}/server.crt"
+    log "TLS certificate generated"
+else
+    log "TLS certificate already exists"
+fi
+
+# Start VNC with TLS encryption (required for cloud access)
 tigervncserver :1 \
     -geometry 1366x768 \
     -depth 24 \
-    -localhost yes \
+    -localhost no \
     -rfbport 5901 \
     -xstartup /root/.vnc/xstartup \
     -rfbauth /root/.vnc/passwd \
+    -TLSNegotiate \
+    -Cert "${CERT_DIR}/server.crt" \
+    -Key "${CERT_DIR}/server.key" \
     > /tmp/vnc.log 2>&1 || {
-    warn "tigervncserver failed, trying Xvfb + x11vnc fallback..."
+    warn "tigervncserver failed, trying x11vnc fallback..."
     apt-get install -y x11vnc 2>/dev/null | tail -2
     Xvfb :1 -screen 0 1366x768x24 &
     sleep 2
     export DISPLAY=:1
     dbus-launch startxfce4 &
     sleep 3
-    x11vnc -display :1 -rfbport 5901 -shared -forever -nopw > /tmp/x11vnc.log 2>&1 &
+    x11vnc -display :1 -rfbport 5901 -shared -forever -vencrypt now \
+        -cert "${CERT_DIR}/server.crt" -key "${CERT_DIR}/server.key" > /tmp/x11vnc.log 2>&1 &
     sleep 2
 }
 
 sleep 3
 
 if ss -tlnp | grep -q ":5901"; then
-    log "VNC server running on port 5901"
+    log "VNC server running with TLS encryption on port 5901"
 else
     err "VNC server NOT listening on port 5901"
     warn "VNC log output:"
