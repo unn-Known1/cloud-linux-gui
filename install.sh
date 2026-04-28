@@ -106,7 +106,9 @@ exec dbus-launch --exit-with-session startxfce4
 XEOF
 chmod +x /root/.vnc/xstartup
 
-VNC_PASS="desktop123"
+# Generate a secure random VNC password
+# SECURITY: Use a randomly generated password instead of hardcoded value
+VNC_PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
 echo "${VNC_PASS}" | vncpasswd -f > /root/.vnc/passwd 2>/dev/null
 if [ ! -s /root/.vnc/passwd ]; then
