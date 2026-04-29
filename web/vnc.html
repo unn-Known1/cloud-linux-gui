@@ -263,6 +263,12 @@
         let rfb;
         let connected = false;
 
+        // Get VNC password from session or URL parameter (set by server)
+        function getVncPassword() {
+            const urlParams = new URLSearchParams(window.location.search);
+            return urlParams.get('vnc_password') || sessionStorage.getItem('vnc_password') || '';
+        }
+
         // Get current tunnel URL
         function getCurrentURL() {
             const url = window.location.href;
@@ -278,10 +284,10 @@
 
             try {
                 const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const port = window.location.port || (window.location.protocol === 'https:' ? 443 : 80);
-            const url = `${proto}//${host}:${port}/websockify`;
+                const url = `${proto}//${host}:${port}/websockify`;
+                const vncPassword = getVncPassword();
                 rfb = new RFB(screen, url, {
-                    credentials: { password: 'cloudlinux' },
+                    credentials: { password: vncPassword },
                     reconnect: true,
                     reconnectDelay: 1000,
                     maxReconnectAttempts: 10
