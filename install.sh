@@ -151,6 +151,33 @@ log "VNC password set: ${VNC_PASS}"
 step "Starting VNC server..."
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
 
+# Set DISPLAY explicitly for all X operations
+export DISPLAY=:1
+
+# Kill any existing Xvfb and VNC processes
+pkill -9 -f "Xvfb :1" 2>/dev/null || true
+tigervncserver -kill :1 2>/dev/null || true
+sleep 1
+
+# Start Xvfb virtual display if not already running
+step "Starting virtual display..."
+if ! pgrep -f "Xvfb :1" > /dev/null; then
+    Xvfb :1 -screen 0 1366x768x24 -ac +extension GLX +render -noreset &
+    XVFB_PID=$!
+    sleep 2
+
+    if ! ps -p $XVFB_PID > /dev/null 2>&1; then
+        err "Xvfb failed to start"
+        # Try alternative approach
+        Xvfb :1 -screen 0 1366x768x24 &
+        sleep 2
+    fi
+    log "Virtual display started"
+fi
+
+# Verify DISPLAY is set
+export DISPLAY=:1
+
 # Generate TLS certificate for encrypted VNC connections
 step "Generating TLS certificate..."
 CERT_DIR="/root/.vnc/certs"
@@ -168,7 +195,23 @@ else
     log "TLS certificate already exists"
 fi
 
-# Start VNC with TLS encryption (required for cloud access)
+# Start XFCE desktop session in background
+step "Starting XFCE desktop..."
+if ! pgrep -f "startxfce4" > /dev/null; then
+    dbus-launch --exit-with-session startxfce4 &
+    sleep 3
+    log "XFCE started"
+else
+    log "XFCE already running"
+fi
+
+# Start VNC server WITHOUT TLS (websockify will handle encryption)
+step "Starting VNC server..."
+# First kill any existing VNC on port 5901
+fuser -k 5901/tcp 2>/dev/null || true
+sleep 1
+
+# Start tigervncserver without TLS options (noVNC handles the encryption)
 tigervncserver :1 \
     -geometry 1366x768 \
     -depth 24 \
@@ -176,59 +219,137 @@ tigervncserver :1 \
     -rfbport 5901 \
     -xstartup /root/.vnc/xstartup \
     -rfbauth /root/.vnc/passwd \
-    -TLSNegotiate \
-    -Cert "${CERT_DIR}/server.crt" \
-    -Key "${CERT_DIR}/server.key" \
-    > /tmp/vnc.log 2>&1 || {
-    warn "tigervncserver failed, trying x11vnc fallback..."
-    apt-get install -y x11vnc 2>/dev/null | tail -2
-    Xvfb :1 -screen 0 1366x768x24 &
-    sleep 2
-    export DISPLAY=:1
-    dbus-launch startxfce4 &
-    sleep 3
-    x11vnc -display :1 -rfbport 5901 -shared -forever -vencrypt now \
-        -cert "${CERT_DIR}/server.crt" -key "${CERT_DIR}/server.key" > /tmp/x11vnc.log 2>&1 &
-    sleep 2
-}
+    > /tmp/vnc.log 2>&1
 
 sleep 3
 
+# Check if VNC is running
 if ss -tlnp | grep -q ":5901"; then
-    log "VNC server running with TLS encryption on port 5901"
+    log "VNC server running on port 5901"
 else
-    err "VNC server NOT listening on port 5901"
-    warn "VNC log output:"
-    cat /tmp/vnc.log 2>/dev/null
+    # Try x11vnc fallback
+    warn "tigervncserver failed, trying x11vnc fallback..."
+    apt-get install -y x11vnc 2>/dev/null | tail -2
+    x11vnc -display :1 -rfbport 5901 -shared -forever \
+        -rfbauth /root/.vnc/passwd \
+        > /tmp/x11vnc.log 2>&1 &
+    sleep 2
+
+    if ss -tlnp | grep -q ":5901"; then
+        log "x11vnc fallback running on port 5901"
+    else
+        err "VNC server NOT listening on port 5901"
+        warn "VNC log output:"
+        cat /tmp/vnc.log 2>/dev/null
+        cat /tmp/x11vnc.log 2>/dev/null
+    fi
 fi
 
 # ── Step 7: Start noVNC ──
 step "Starting noVNC web server..."
 
+# Verify VNC is running before starting noVNC
+if ! ss -tlnp | grep -q ":5901"; then
+    err "VNC server is not running! Cannot start noVNC."
+    cat /tmp/vnc.log 2>/dev/null
+    exit 1
+fi
+
+# Kill any existing websockify processes
+pkill -f "websockify.*6080" 2>/dev/null || true
+sleep 1
+
+# Start websockify to bridge WebSocket to VNC
 nohup websockify \
     --web="${NOVNC_DIR}" \
     --heartbeat=30 \
+    --timeout=30 \
+    --idle-timeout=0 \
     6080 \
     localhost:5901 \
     > /tmp/novnc.log 2>&1 &
 
+NOVNC_PID=$!
 sleep 3
 
+# Check if noVNC is listening
 if ss -tlnp | grep -q ":6080"; then
     log "noVNC running on port 6080"
 else
-    err "noVNC failed to start"
+    err "noVNC failed to start - killing PID ${NOVNC_PID}"
+    kill $NOVNC_PID 2>/dev/null || true
     cat /tmp/novnc.log 2>/dev/null
     exit 1
 fi
 
-# ── Step 8: Test local connection ──
-step "Testing local web server..."
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:6080/ 2>/dev/null || echo "000")
-if [ "${HTTP_CODE}" = "200" ]; then
-    log "Web server responding (HTTP 200)"
+# Verify noVNC can connect to VNC
+step "Testing VNC connection through noVNC..."
+if curl -s --max-time 5 http://localhost:6080/ | grep -q "noVNC"; then
+    log "noVNC is serving content"
 else
-    warn "Web server returned HTTP ${HTTP_CODE} (may still work)"
+    warn "noVNC content test failed, but service may still work"
+fi
+
+# ── Step 8: Start password API server ──
+step "Starting password API server..."
+
+# Create a simple Python HTTP server to serve the VNC password
+cat > /tmp/vnc_password_server.py << 'PYSERVER'
+#!/usr/bin/env python3
+import os
+import http.server
+import socketserver
+import json
+
+PORT = 6081
+
+class VncPasswordHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/vnc-password' or self.path == '/api/password':
+            # Read password from file
+            try:
+                with open('/root/.vnc/password.txt', 'r') as f:
+                    password = f.read().strip()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'password': password}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+        elif self.path == '/health':
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # Suppress logging
+
+with socketserver.TCPServer(("", PORT), VncPasswordHandler) as httpd:
+    httpd.allow_reuse_address = True
+    httpd.serve_forever()
+PYSERVER
+
+chmod +x /tmp/vnc_password_server.py
+
+# Kill any existing password server
+pkill -f "vnc_password_server.py" 2>/dev/null || true
+
+# Start the password server
+nohup python3 /tmp/vnc_password_server.py > /tmp/password_server.log 2>&1 &
+PASSWORD_PID=$!
+sleep 1
+
+# Verify server is running
+if ss -tlnp | grep -q ":6081"; then
+    log "Password API server running on port 6081"
+else
+    warn "Password server failed to start"
 fi
 
 # ── Step 9: Start Cloudflare Tunnel ──
@@ -260,23 +381,28 @@ for i in $(seq 1 30); do
 done
 echo ""
 
-# ── Step 10: Final Output ──
+# ── Step 11: Final Output ──
 echo ""
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+
+# Save password to file for retrieval
+echo "${VNC_PASS}" > /root/.vnc/password.txt
+chmod 600 /root/.vnc/password.txt
 
 if [ -n "${TUNNEL_URL}" ]; then
     echo ""
     echo -e "  ${GREEN}🎉 SUCCESS! Your Linux Desktop is ready!${NC}"
     echo ""
     echo -e "  ${BLUE}📺 Desktop URL:${NC}"
-    echo -e "     ${GREEN}${TUNNEL_URL}/vnc_lite.html${NC}"
+    echo -e "     ${GREEN}${TUNNEL_URL}/vnc.html${NC}"
     echo ""
     echo -e "  ${BLUE}🔑 VNC Password:${NC} ${YELLOW}${VNC_PASS}${NC}"
     echo ""
-    echo -e "  ${BLUE}📺 Alternative (auto-connect):${NC}"
-    echo -e "     ${GREEN}${TUNNEL_URL}/vnc.html?autoconnect=true${NC}"
+    echo -e "  ${BLUE}📺 Alternative (direct):${NC}"
+    echo -e "     ${GREEN}${TUNNEL_URL}/vnc_lite.html${NC}"
     echo ""
     echo "${TUNNEL_URL}" > /opt/tunnel_url.txt
+    echo "${VNC_PASS}" > /opt/vnc_password.txt
 else
     err "Tunnel URL not found after 60 seconds"
     echo ""
@@ -284,7 +410,9 @@ else
     echo -e "     grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log"
     echo ""
     echo -e "  ${YELLOW}Local access:${NC}"
-    echo -e "     http://localhost:6080/vnc_lite.html"
+    echo -e "     http://localhost:6080/vnc.html"
+    echo ""
+    echo -e "  ${YELLOW}VNC Password:${NC} ${YELLOW}${VNC_PASS}${NC}"
 fi
 
 echo ""
