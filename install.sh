@@ -300,42 +300,60 @@ if [ "$VNC_RUNNING" = "false" ]; then
     err "VNC server is not running! Cannot start noVNC."
     err "Please run the script again or check VNC logs"
     cat /tmp/vnc.log 2>/dev/null | tail -20
-    # Don't exit - try to start anyway in case VNC just needs a moment
 fi
 
 # Kill any existing websockify processes
 pkill -f "websockify.*6080" 2>/dev/null || true
-sleep 1
+pkill -f "websockify --web" 2>/dev/null || true
+sleep 2
 
 # Start websockify with nohup for proper backgrounding
+# Use venv option if available, otherwise direct command
+step "Starting websockify..."
 nohup websockify \
     --web="${NOVNC_DIR}" \
     --heartbeat=30 \
-    --timeout=30 \
-    --idle-timeout=0 \
-    --unix-target \
+    --timeout=0 \
     6080 \
     localhost:5901 \
     > /tmp/novnc.log 2>&1 &
 
 NOVNC_PID=$!
-sleep 3
+sleep 4
 
 # Check if noVNC is listening
 if ss -tlnp 2>/dev/null | grep -q ":6080"; then
     log "noVNC websockify running on port 6080 (PID: ${NOVNC_PID})"
 else
-    err "noVNC may have failed to start - PID: ${NOVNC_PID}"
-    warn "Check /tmp/novnc.log for details"
+    warn "noVNC may have failed to start - checking process..."
+    if pgrep -f "websockify" > /dev/null 2>&1; then
+        log "websockify process exists but port check failed"
+    else
+        err "websockify process NOT found - check /tmp/novnc.log"
+        cat /tmp/novnc.log 2>/dev/null | tail -10
+        # Try direct invocation as fallback
+        step "Trying alternative websockify invocation..."
+        nohup python3 -m websockify \
+            --web="${NOVNC_DIR}" \
+            6080 \
+            localhost:5901 \
+            > /tmp/novnc2.log 2>&1 &
+        sleep 4
+    fi
 fi
 
 # Verify noVNC can serve content
 step "Testing noVNC connection..."
-if curl -s --max-time 5 http://localhost:6080/ 2>/dev/null | grep -qi "novnc\|vnc"; then
-    log "noVNC is serving content"
-else
-    warn "noVNC content test inconclusive - service may still work"
-fi
+for attempt in 1 2 3; do
+    if curl -s --max-time 5 http://localhost:6080/ 2>/dev/null | grep -qi "novnc\|vnc"; then
+        log "noVNC is serving content"
+        break
+    fi
+    if [ $attempt -lt 3 ]; then
+        warn "Attempt $attempt failed, retrying in 2s..."
+        sleep 2
+    fi
+done
 
 # ── Step 8: Start password API server ──
 step "Starting password API server..."
