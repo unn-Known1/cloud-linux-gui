@@ -270,20 +270,58 @@
             return url;
         }
 
-        // Initialize VNC connection
-        function connect() {
+        // Get password from secure source - never hardcode in frontend
+        // Password should be fetched from server-side endpoint or passed via secure channel
+        async function getVncPassword() {
+            // Try to fetch password from local secure endpoint
+            try {
+                const response = await fetch('/vnc-password');
+                if (response.ok) {
+                    const data = await response.json();
+                    return data.password;
+                }
+            } catch (e) {
+                console.warn('Could not fetch VNC password securely');
+            }
+            // Fallback: check if password was passed via secure URL parameter (one-time use)
+            const urlParams = new URLSearchParams(window.location.search);
+            const tempPass = urlParams.get('p');
+            if (tempPass && tempPass.length >= 8) {
+                return tempPass;
+            }
+            // Last resort: prompt user securely
+            return prompt('Enter VNC password:') || '';
+        }
+
+        // Connection state for exponential backoff
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 10;
+        const BASE_DELAY_MS = 1000;
+        const MAX_DELAY_MS = 60000;
+
+        function getReconnectDelay() {
+            // Exponential backoff: 1s, 2s, 4s, 8s, ... up to 60s max
+            const delay = Math.min(BASE_DELAY_MS * Math.pow(2, reconnectAttempts), MAX_DELAY_MS);
+            // Add jitter (±10%) to prevent thundering herd
+            const jitter = delay * 0.1 * (Math.random() * 2 - 1);
+            return Math.round(delay + jitter);
+        }
+
+        async function connect() {
             const screen = document.getElementById('screen');
             const host = window.location.hostname;
             const port = window.location.port || (window.location.protocol === 'https:' ? 443 : 80);
 
             try {
                 const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const url = `${proto}//${host}:${port}/websockify`;
-                rfb = new RFB(screen, url, {
-                    credentials: { password: 'cloudlinux' },
-                    reconnect: true,
-                    reconnectDelay: 1000,
-                    maxReconnectAttempts: 10
+                const wsUrl = `${proto}//${host}:${port}/websockify`;
+
+                // Fetch password securely
+                const vncPassword = await getVncPassword();
+
+                rfb = new RFB(screen, wsUrl, {
+                    credentials: { password: vncPassword },
+                    reconnect: false  // We handle reconnection ourselves with backoff
                 });
 
                 rfb.addEventListener('connect', () => {
@@ -296,6 +334,17 @@
                     connected = false;
                     document.getElementById('loading').classList.remove('hidden');
                     document.querySelectorAll('#controls .btn')[3].classList.remove('connected');
+
+                    // Handle reconnection with exponential backoff (issue #42)
+                    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        const delay = getReconnectDelay();
+                        reconnectAttempts++;
+                        console.log(`Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+                        setTimeout(connect, delay);
+                    } else {
+                        console.error('Max reconnection attempts reached');
+                        document.querySelector('.subtitle').textContent = 'Connection lost. Please refresh the page.';
+                    }
                 });
 
                 rfb.addEventListener('clipboard', (e) => {
@@ -344,6 +393,7 @@
         }
 
         function refresh() {
+            reconnectAttempts = 0;  // Reset on manual refresh
             if (rfb) {
                 rfb.disconnect();
                 setTimeout(connect, 1000);

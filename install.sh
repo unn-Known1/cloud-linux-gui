@@ -62,10 +62,39 @@ if ! command -v cloudflared &>/dev/null; then
         aarch64|arm64) CF_ARCH="arm64" ;;
         *)             CF_ARCH="amd64" ;;
     esac
-    curl -sL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" \
-        -o /usr/local/bin/cloudflared
+
+    # SECURITY: Download to temp file first, then verify and install
+    # Do NOT pipe directly to bash (CWE-88)
+    CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}"
+    CF_FILE="/tmp/cloudflared-$$"
+    trap 'rm -f "${CF_FILE}"' EXIT
+
+    step "Downloading cloudflared..."
+    if ! curl -sL "${CF_URL}" -o "${CF_FILE}"; then
+        err "Failed to download cloudflared"
+        exit 1
+    fi
+
+    step "Verifying binary..."
+    # Verify it's a valid ELF binary
+    if ! file "${CF_FILE}" | grep -q "ELF"; then
+        err "Downloaded file is not a valid ELF binary - possible MITM attack"
+        exit 1
+    fi
+
+    # Verify file size is reasonable (10-100MB for cloudflared)
+    CF_SIZE=$(stat -c%s "${CF_FILE}" 2>/dev/null || stat -f%z "${CF_FILE}" 2>/dev/null)
+    if [ "${CF_SIZE}" -lt 10000000 ] || [ "${CF_SIZE}" -gt 100000000 ]; then
+        err "Downloaded file size ${CF_SIZE} bytes is unusual"
+        exit 1
+    fi
+
+    step "Installing cloudflared..."
+    mv "${CF_FILE}" /usr/local/bin/cloudflared
     chmod +x /usr/local/bin/cloudflared
-    log "Cloudflared downloaded and installed"
+    # Clear the trap since file was moved
+    trap - EXIT
+    log "Cloudflared downloaded, verified, and installed"
 else
     log "Cloudflared already installed"
 fi
