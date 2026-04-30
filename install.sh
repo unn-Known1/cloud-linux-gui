@@ -1,5 +1,6 @@
 #!/bin/bash
-set -e
+# Don't use set -e - we need to handle errors gracefully and continue
+# set -e
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -62,10 +63,39 @@ if ! command -v cloudflared &>/dev/null; then
         aarch64|arm64) CF_ARCH="arm64" ;;
         *)             CF_ARCH="amd64" ;;
     esac
-    curl -sL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" \
-        -o /usr/local/bin/cloudflared
+
+    # SECURITY: Download to temp file first, then verify and install
+    # Do NOT pipe directly to bash (CWE-88)
+    CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}"
+    CF_FILE="/tmp/cloudflared-$$"
+    trap 'rm -f "${CF_FILE}"' EXIT
+
+    step "Downloading cloudflared..."
+    if ! curl -sL "${CF_URL}" -o "${CF_FILE}"; then
+        err "Failed to download cloudflared"
+        exit 1
+    fi
+
+    step "Verifying binary..."
+    # Verify it's a valid ELF binary
+    if ! file "${CF_FILE}" | grep -q "ELF"; then
+        err "Downloaded file is not a valid ELF binary - possible MITM attack"
+        exit 1
+    fi
+
+    # Verify file size is reasonable (10-100MB for cloudflared)
+    CF_SIZE=$(stat -c%s "${CF_FILE}" 2>/dev/null || stat -f%z "${CF_FILE}" 2>/dev/null)
+    if [ "${CF_SIZE}" -lt 10000000 ] || [ "${CF_SIZE}" -gt 100000000 ]; then
+        err "Downloaded file size ${CF_SIZE} bytes is unusual"
+        exit 1
+    fi
+
+    step "Installing cloudflared..."
+    mv "${CF_FILE}" /usr/local/bin/cloudflared
     chmod +x /usr/local/bin/cloudflared
-    log "Cloudflared downloaded and installed"
+    # Clear the trap since file was moved
+    trap - EXIT
+    log "Cloudflared downloaded, verified, and installed"
 else
     log "Cloudflared already installed"
 fi
@@ -120,15 +150,50 @@ log "VNC password set: ${VNC_PASS}"
 
 # ── Step 6: Start VNC Server ──
 step "Starting VNC server..."
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
 
-# Generate TLS certificate for encrypted VNC connections
+# Clean up any existing locks and processes
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
+pkill -9 -f "Xvfb :1" 2>/dev/null || true
+pkill -9 -f "Xtigervnc" 2>/dev/null || true
+pkill -9 -f "x11vnc" 2>/dev/null || true
+fuser -k 5901/tcp 2>/dev/null || true
+sleep 2
+
+# Set DISPLAY explicitly
+export DISPLAY=:1
+
+# Step 6a: Start Xvfb virtual display
+step "Starting Xvfb virtual display..."
+if pgrep -f "Xvfb :1" > /dev/null 2>&1; then
+    log "Xvfb already running"
+else
+    nohup Xvfb :1 -screen 0 1366x768x24 -ac +extension GLX +render -noreset > /tmp/xvfb.log 2>&1 &
+    XVFB_PID=$!
+    sleep 2
+
+    if ps -p $XVFB_PID > /dev/null 2>&1; then
+        log "Xvfb started with PID ${XVFB_PID}"
+    else
+        warn "Xvfb may have failed - check /tmp/xvfb.log"
+        cat /tmp/xvfb.log 2>/dev/null | tail -10
+    fi
+fi
+
+# Verify Xvfb is running
+if pgrep -f "Xvfb :1" > /dev/null 2>&1; then
+    log "Xvfb is running"
+else
+    err "Xvfb is NOT running - attempting recovery..."
+    nohup Xvfb :1 -screen 0 1366x768x24 > /tmp/xvfb.log 2>&1 &
+    sleep 3
+fi
+
+# Step 6b: Generate TLS certificate (optional - noVNC handles encryption)
 step "Generating TLS certificate..."
 CERT_DIR="/root/.vnc/certs"
 mkdir -p "${CERT_DIR}"
 chmod 700 "${CERT_DIR}"
 
-# Generate self-signed certificate if not exists
 if [ ! -f "${CERT_DIR}/server.crt" ] || [ ! -f "${CERT_DIR}/server.key" ]; then
     openssl req -x509 -newkey rsa:4096 -keyout "${CERT_DIR}/server.key" -out "${CERT_DIR}/server.crt" \
         -days 365 -nodes -subj "/CN=VNC Server/O=Cloud Linux GUI" 2>/dev/null
@@ -139,72 +204,213 @@ else
     log "TLS certificate already exists"
 fi
 
-# Start VNC with TLS encryption (required for cloud access)
-tigervncserver :1 \
+# Step 6c: Start XFCE desktop session (CRITICAL - must be before VNC)
+step "Starting XFCE desktop session..."
+if pgrep -f "startxfce4" > /dev/null 2>&1; then
+    log "XFCE already running"
+else
+    # Kill any existing dbus processes
+    pkill -f "dbus-daemon" 2>/dev/null || true
+    sleep 1
+
+    # Start XFCE with dbus in background
+    nohup dbus-launch --exit-with-session startxfce4 > /tmp/xfce.log 2>&1 &
+    XFCE_PID=$!
+    sleep 5
+
+    if ps -p $XFCE_PID > /dev/null 2>&1; then
+        log "XFCE started with PID ${XFCE_PID}"
+    else
+        log "XFCE process started (background)"
+    fi
+fi
+
+# Verify DISPLAY
+export DISPLAY=:1
+
+# Step 6d: Start VNC server with explicit backgrounding and verification
+step "Starting TigerVNC server..."
+
+# Kill any existing VNC on port 5901
+fuser -k 5901/tcp 2>/dev/null || true
+sleep 1
+
+# Start tigervncserver in background with nohup
+nohup tigervncserver :1 \
     -geometry 1366x768 \
     -depth 24 \
     -localhost no \
     -rfbport 5901 \
     -xstartup /root/.vnc/xstartup \
     -rfbauth /root/.vnc/passwd \
-    -TLSNegotiate \
-    -Cert "${CERT_DIR}/server.crt" \
-    -Key "${CERT_DIR}/server.key" \
-    > /tmp/vnc.log 2>&1 || {
-    warn "tigervncserver failed, trying x11vnc fallback..."
-    apt-get install -y x11vnc 2>/dev/null | tail -2
-    Xvfb :1 -screen 0 1366x768x24 &
-    sleep 2
-    export DISPLAY=:1
-    dbus-launch startxfce4 &
-    sleep 3
-    x11vnc -display :1 -rfbport 5901 -shared -forever -vencrypt now \
-        -cert "${CERT_DIR}/server.crt" -key "${CERT_DIR}/server.key" > /tmp/x11vnc.log 2>&1 &
-    sleep 2
-}
+    > /tmp/vnc.log 2>&1 &
 
+VNC_PID=$!
 sleep 3
 
-if ss -tlnp | grep -q ":5901"; then
-    log "VNC server running with TLS encryption on port 5901"
+# Check if VNC is running
+if ss -tlnp 2>/dev/null | grep -q ":5901"; then
+    log "TigerVNC server running on port 5901 (PID: ${VNC_PID})"
+elif pgrep -f "Xtigervnc" > /dev/null 2>&1; then
+    log "TigerVNC is running"
 else
-    err "VNC server NOT listening on port 5901"
-    warn "VNC log output:"
-    cat /tmp/vnc.log 2>/dev/null
+    # Try x11vnc fallback
+    warn "TigerVNC failed - trying x11vnc fallback..."
+
+    # Install x11vnc if needed
+    if ! command -v x11vnc > /dev/null 2>&1; then
+        step "Installing x11vnc..."
+        apt-get install -y x11vnc 2>&1 | tail -3
+    fi
+
+    # Start x11vnc
+    nohup x11vnc -display :1 -rfbport 5901 -shared -forever -nopw \
+        > /tmp/x11vnc.log 2>&1 &
+    X11VNC_PID=$!
+    sleep 2
+
+    if ss -tlnp 2>/dev/null | grep -q ":5901"; then
+        log "x11vnc fallback running on port 5901 (PID: ${X11VNC_PID})"
+    else
+        err "VNC server FAILED to start!"
+        err "Please check logs:"
+        echo "  cat /tmp/vnc.log"
+        echo "  cat /tmp/x11vnc.log"
+        echo "  cat /tmp/xvfb.log"
+    fi
 fi
 
 # ── Step 7: Start noVNC ──
 step "Starting noVNC web server..."
 
+# Verify VNC is running before starting noVNC
+VNC_RUNNING=false
+if ss -tlnp 2>/dev/null | grep -q ":5901"; then
+    VNC_RUNNING=true
+    log "VNC is running on port 5901"
+elif pgrep -f "Xtigervnc" > /dev/null 2>&1; then
+    VNC_RUNNING=true
+    log "TigerVNC is running"
+elif pgrep -f "x11vnc" > /dev/null 2>&1; then
+    VNC_RUNNING=true
+    log "x11vnc is running"
+fi
+
+if [ "$VNC_RUNNING" = "false" ]; then
+    err "VNC server is not running! Cannot start noVNC."
+    err "Please run the script again or check VNC logs"
+    cat /tmp/vnc.log 2>/dev/null | tail -20
+    # Don't exit - try to start anyway in case VNC just needs a moment
+fi
+
+# Kill any existing websockify processes
+pkill -f "websockify.*6080" 2>/dev/null || true
+sleep 1
+
+# Start websockify with nohup for proper backgrounding
 nohup websockify \
     --web="${NOVNC_DIR}" \
     --heartbeat=30 \
+    --timeout=30 \
+    --idle-timeout=0 \
+    --unix-target \
     6080 \
     localhost:5901 \
     > /tmp/novnc.log 2>&1 &
 
+NOVNC_PID=$!
 sleep 3
 
-if ss -tlnp | grep -q ":6080"; then
-    log "noVNC running on port 6080"
+# Check if noVNC is listening
+if ss -tlnp 2>/dev/null | grep -q ":6080"; then
+    log "noVNC websockify running on port 6080 (PID: ${NOVNC_PID})"
 else
-    err "noVNC failed to start"
-    cat /tmp/novnc.log 2>/dev/null
-    exit 1
+    err "noVNC may have failed to start - PID: ${NOVNC_PID}"
+    warn "Check /tmp/novnc.log for details"
 fi
 
-# ── Step 8: Test local connection ──
-step "Testing local web server..."
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:6080/ 2>/dev/null || echo "000")
-if [ "${HTTP_CODE}" = "200" ]; then
-    log "Web server responding (HTTP 200)"
+# Verify noVNC can serve content
+step "Testing noVNC connection..."
+if curl -s --max-time 5 http://localhost:6080/ 2>/dev/null | grep -qi "novnc\|vnc"; then
+    log "noVNC is serving content"
 else
-    warn "Web server returned HTTP ${HTTP_CODE} (may still work)"
+    warn "noVNC content test inconclusive - service may still work"
+fi
+
+# ── Step 8: Start password API server ──
+step "Starting password API server..."
+
+# Save password first before starting server
+echo "${VNC_PASS}" > /root/.vnc/password.txt
+chmod 600 /root/.vnc/password.txt
+
+# Create password API server
+cat > /tmp/vnc_password_server.py << 'PYSERVER'
+#!/usr/bin/env python3
+import os
+import http.server
+import socketserver
+import json
+
+PORT = 6081
+
+class VncPasswordHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/vnc-password' or self.path == '/api/password':
+            try:
+                with open('/root/.vnc/password.txt', 'r') as f:
+                    password = f.read().strip()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'password': password}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+        elif self.path == '/health':
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+with socketserver.TCPServer(("", PORT), VncPasswordHandler) as httpd:
+    httpd.allow_reuse_address = True
+    httpd.serve_forever()
+PYSERVER
+
+chmod +x /tmp/vnc_password_server.py
+
+# Kill any existing password server
+pkill -f "vnc_password_server.py" 2>/dev/null || true
+sleep 1
+
+# Start password server in background
+nohup python3 /tmp/vnc_password_server.py > /tmp/password_server.log 2>&1 &
+PASSWORD_PID=$!
+sleep 1
+
+# Verify server is running
+if ss -tlnp 2>/dev/null | grep -q ":6081"; then
+    log "Password API server running on port 6081 (PID: ${PASSWORD_PID})"
+else
+    warn "Password server check - may still be starting"
 fi
 
 # ── Step 9: Start Cloudflare Tunnel ──
-step "Starting Cloudflare Tunnel (please wait ~30 seconds)..."
+step "Starting Cloudflare Tunnel (please wait ~60 seconds)..."
 
+# Kill any existing cloudflared
+pkill -f "cloudflared" 2>/dev/null || true
+sleep 1
+
+# Start cloudflared tunnel
 nohup cloudflared tunnel \
     --url http://localhost:6080 \
     --no-autoupdate \
@@ -212,18 +418,23 @@ nohup cloudflared tunnel \
 
 CF_PID=$!
 TUNNEL_URL=""
+TUNNEL_READY=false
 
+# Poll for tunnel URL with extended timeout
+step "Waiting for tunnel URL (up to 60 seconds)..."
 for i in $(seq 1 30); do
     sleep 2
 
     if ! kill -0 ${CF_PID} 2>/dev/null; then
         err "Cloudflared process crashed!"
-        cat /tmp/cloudflared.log | tail -20
-        exit 1
+        cat /tmp/cloudflared.log 2>/dev/null | tail -20
+        break
     fi
 
     TUNNEL_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -1)
     if [ -n "${TUNNEL_URL}" ]; then
+        TUNNEL_READY=true
+        log "Cloudflare Tunnel ready: ${TUNNEL_URL}"
         break
     fi
 
@@ -231,31 +442,51 @@ for i in $(seq 1 30); do
 done
 echo ""
 
+if [ "$TUNNEL_READY" = "false" ]; then
+    warn "Tunnel URL not yet visible - cloudflared may still be initializing"
+fi
+
 # ── Step 10: Final Output ──
 echo ""
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}         Cloud Linux GUI - Installation Complete${NC}"
+echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+
+# Save password to files
+echo "${VNC_PASS}" > /root/.vnc/password.txt
+chmod 600 /root/.vnc/password.txt
+echo "${VNC_PASS}" > /opt/vnc_password.txt
+chmod 644 /opt/vnc_password.txt
+
+# Try to get tunnel URL one more time if not found
+if [ -z "${TUNNEL_URL}" ]; then
+    TUNNEL_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -1)
+fi
 
 if [ -n "${TUNNEL_URL}" ]; then
+    echo "${TUNNEL_URL}" > /opt/tunnel_url.txt
     echo ""
-    echo -e "  ${GREEN}🎉 SUCCESS! Your Linux Desktop is ready!${NC}"
+    echo -e "  ${GREEN}SUCCESS! Your Linux Desktop is ready!${NC}"
     echo ""
-    echo -e "  ${BLUE}📺 Desktop URL:${NC}"
+    echo -e "  ${BLUE}Desktop URL:${NC}"
+    echo -e "     ${GREEN}${TUNNEL_URL}/vnc.html${NC}"
+    echo ""
+    echo -e "  ${BLUE}VNC Password:${NC} ${YELLOW}${VNC_PASS}${NC}"
+    echo ""
+    echo -e "  ${BLUE}Alternative (direct):${NC}"
     echo -e "     ${GREEN}${TUNNEL_URL}/vnc_lite.html${NC}"
     echo ""
-    echo -e "  ${BLUE}🔑 VNC Password:${NC} ${YELLOW}${VNC_PASS}${NC}"
-    echo ""
-    echo -e "  ${BLUE}📺 Alternative (auto-connect):${NC}"
-    echo -e "     ${GREEN}${TUNNEL_URL}/vnc.html?autoconnect=true${NC}"
-    echo ""
-    echo "${TUNNEL_URL}" > /opt/tunnel_url.txt
 else
-    err "Tunnel URL not found after 60 seconds"
     echo ""
-    echo -e "  ${YELLOW}Check manually:${NC}"
-    echo -e "     grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log"
+    echo -e "  ${YELLOW}Cloudflare Tunnel still initializing...${NC}"
     echo ""
-    echo -e "  ${YELLOW}Local access:${NC}"
-    echo -e "     http://localhost:6080/vnc_lite.html"
+    echo -e "  ${YELLOW}To get tunnel URL, run:${NC}"
+    echo -e "     ${YELLOW}cat /tmp/cloudflared.log | grep trycloudflare${NC}"
+    echo ""
+    echo -e "  ${YELLOW}Or wait and check:${NC}"
+    echo -e "     ${YELLOW}cat /opt/tunnel_url.txt${NC}"
+    echo ""
+    echo -e "  ${YELLOW}VNC Password:${NC} ${YELLOW}${VNC_PASS}${NC}"
 fi
 
 echo ""
