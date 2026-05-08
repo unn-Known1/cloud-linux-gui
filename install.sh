@@ -1,6 +1,4 @@
 #!/bin/bash
-# Don't use set -e - we need to handle errors gracefully and continue
-# set -e
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -20,39 +18,85 @@ echo -e "${GREEN}═════════════════════
 echo ""
 
 if [ "$(id -u)" -ne 0 ]; then
-    err "Run as root: sudo bash /tmp/setup.sh"
+    err "Run as root: sudo bash install.sh"
     exit 1
 fi
 
-# ── Step 1: Kill old processes ──
-step "Killing old processes..."
-pkill -9 -f "Xtigervnc" 2>/dev/null || true
-pkill -9 -f "Xvnc" 2>/dev/null || true
-pkill -9 -f "Xvfb" 2>/dev/null || true
-pkill -9 -f "websockify" 2>/dev/null || true
-pkill -9 -f "cloudflared" 2>/dev/null || true
-pkill -9 -f "startxfce4" 2>/dev/null || true
-sleep 2
+# ── PID tracking: only kill what we ourselves started ──
+PID_DIR="/tmp/cloud-gui-pids"
+mkdir -p "$PID_DIR"
+
+save_pid() {
+    echo "$2" > "$PID_DIR/$1"
+}
+
+cleanup_all() {
+    for f in "$PID_DIR"/*; do
+        [ -f "$f" ] || continue
+        local pid=$(cat "$f" 2>/dev/null)
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
+    rm -rf "$PID_DIR"
+}
+
+# Clean up orphaned processes from a prior run (by PID file, not by name)
+cleanup_all 2>/dev/null || true
 rm -f /tmp/.X*-lock 2>/dev/null || true
 rm -rf /tmp/.X11-unix/X* 2>/dev/null || true
-log "Old processes cleaned"
+
+# ── Cleanup trap: kill only our tracked PIDs on Ctrl+C / SIGTERM ──
+# NOTE: EXIT is intentionally omitted — we want services to keep running after script finishes
+trap 'cleanup_all' INT TERM
+
+step "System check..."
+MIN_RAM_MB=1024
+total_ram=$(free -m | awk '/^Mem:/{print $2}')
+if [ "$total_ram" -lt "$MIN_RAM_MB" ]; then
+    err "Only ${total_ram}MB RAM detected (minimum ${MIN_RAM_MB}MB required)"
+    err "This system may not have enough memory to run a desktop environment"
+fi
+
+# ── Step 1: Wait for dpkg lock ──
+step "Waiting for dpkg lock (if held by another process)..."
+for i in $(seq 1 30); do
+    if lsof /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock 2>/dev/null; then
+        if [ "$i" -eq 30 ]; then
+            err "dpkg lock still held after 60s. Aborting."
+            exit 1
+        fi
+        warn "dpkg lock held, waiting (${i}/30)..."
+        sleep 2
+    else
+        break
+    fi
+done
 
 # ── Step 2: Install packages ──
 step "Installing packages (this may take a minute)..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq 2>/dev/null
+apt-get update -qq 2>&1 || warn "apt-get update had issues (network may be slow)"
 
-step "Installing desktop environment..."
-apt-get install -y xfce4 xfce4-terminal dbus-x11 2>&1 | tail -3
-log "Desktop installed"
+install_pkg() {
+    local desc="$1"
+    shift
+    step "Installing ${desc}..."
+    apt-get install -y "$@" 2>&1 | tail -3
+    local apt_exit=${PIPESTATUS[0]}
+    if [ "$apt_exit" -ne 0 ]; then
+        err "Failed to install ${desc} (exit code $apt_exit)"
+        return 1
+    fi
+    for pkg in "$@"; do
+        if ! dpkg -l "$pkg" 2>/dev/null | grep -q '^ii'; then
+            warn "Package '$pkg' may not have been installed correctly"
+        fi
+    done
+    log "${desc} installed"
+}
 
-step "Installing VNC server..."
-apt-get install -y tigervnc-standalone-server tigervnc-common 2>&1 | tail -3
-log "VNC installed"
-
-step "Installing tools..."
-apt-get install -y websockify curl wget git procps net-tools xfonts-base fonts-ubuntu 2>&1 | tail -3
-log "Tools installed"
+install_pkg "desktop environment" xfce4 xfce4-terminal dbus-x11 || true
+install_pkg "VNC server" tigervnc-standalone-server tigervnc-common || true
+install_pkg "tools" websockify curl wget git procps net-tools xfonts-base fonts-ubuntu || true
 
 # ── Step 3: Install cloudflared ──
 step "Installing cloudflared..."
@@ -64,8 +108,6 @@ if ! command -v cloudflared &>/dev/null; then
         *)             CF_ARCH="amd64" ;;
     esac
 
-    # SECURITY: Download to temp file first, then verify and install
-    # Do NOT pipe directly to bash (CWE-88)
     CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}"
     CF_FILE="/tmp/cloudflared-$$"
     trap 'rm -f "${CF_FILE}"' EXIT
@@ -77,13 +119,11 @@ if ! command -v cloudflared &>/dev/null; then
     fi
 
     step "Verifying binary..."
-    # Verify it's a valid ELF binary
     if ! file "${CF_FILE}" | grep -q "ELF"; then
         err "Downloaded file is not a valid ELF binary - possible MITM attack"
         exit 1
     fi
 
-    # Verify file size is reasonable (10-100MB for cloudflared)
     CF_SIZE=$(stat -c%s "${CF_FILE}" 2>/dev/null || stat -f%z "${CF_FILE}" 2>/dev/null)
     if [ "${CF_SIZE}" -lt 10000000 ] || [ "${CF_SIZE}" -gt 100000000 ]; then
         err "Downloaded file size ${CF_SIZE} bytes is unusual"
@@ -93,7 +133,6 @@ if ! command -v cloudflared &>/dev/null; then
     step "Installing cloudflared..."
     mv "${CF_FILE}" /usr/local/bin/cloudflared
     chmod +x /usr/local/bin/cloudflared
-    # Clear the trap since file was moved
     trap - EXIT
     log "Cloudflared downloaded, verified, and installed"
 else
@@ -136,8 +175,6 @@ exec dbus-launch --exit-with-session startxfce4
 XEOF
 chmod +x /root/.vnc/xstartup
 
-# Generate a secure random VNC password
-# SECURITY: Use a randomly generated password instead of hardcoded value
 VNC_PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
 echo "${VNC_PASS}" | vncpasswd -f > /root/.vnc/passwd 2>/dev/null
@@ -146,49 +183,39 @@ if [ ! -s /root/.vnc/passwd ]; then
     printf '%s\n%s\nn\n' "${VNC_PASS}" "${VNC_PASS}" | vncpasswd /root/.vnc/passwd 2>/dev/null || true
 fi
 chmod 600 /root/.vnc/passwd
-log "VNC password set: ${VNC_PASS}"
+
+# Save password securely (never log it)
+echo "${VNC_PASS}" > /root/.vnc/password.txt
+chmod 600 /root/.vnc/password.txt
+log "VNC password configured"
 
 # ── Step 6: Start VNC Server ──
 step "Starting VNC server..."
 
-# Clean up any existing locks and processes
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
-pkill -9 -f "Xvfb :1" 2>/dev/null || true
-pkill -9 -f "Xtigervnc" 2>/dev/null || true
-pkill -9 -f "x11vnc" 2>/dev/null || true
-fuser -k 5901/tcp 2>/dev/null || true
-sleep 2
 
-# Set DISPLAY explicitly
 export DISPLAY=:1
 
 # Step 6a: Start Xvfb virtual display
 step "Starting Xvfb virtual display..."
-if pgrep -f "Xvfb :1" > /dev/null 2>&1; then
-    log "Xvfb already running"
+nohup Xvfb :1 -screen 0 1366x768x24 -ac +extension GLX +render -noreset > /tmp/xvfb.log 2>&1 &
+XVFB_PID=$!
+save_pid "xvfb" "$XVFB_PID"
+sleep 2
+
+if ps -p "$XVFB_PID" > /dev/null 2>&1; then
+    log "Xvfb started with PID ${XVFB_PID}"
 else
-    nohup Xvfb :1 -screen 0 1366x768x24 -ac +extension GLX +render -noreset > /tmp/xvfb.log 2>&1 &
+    err "Xvfb failed to start - check /tmp/xvfb.log"
+    cat /tmp/xvfb.log 2>/dev/null | tail -10
+    warn "Attempting Xvfb without GLX..."
+    nohup Xvfb :1 -screen 0 1366x768x24 -ac > /tmp/xvfb.log 2>&1 &
     XVFB_PID=$!
-    sleep 2
-
-    if ps -p $XVFB_PID > /dev/null 2>&1; then
-        log "Xvfb started with PID ${XVFB_PID}"
-    else
-        warn "Xvfb may have failed - check /tmp/xvfb.log"
-        cat /tmp/xvfb.log 2>/dev/null | tail -10
-    fi
-fi
-
-# Verify Xvfb is running
-if pgrep -f "Xvfb :1" > /dev/null 2>&1; then
-    log "Xvfb is running"
-else
-    err "Xvfb is NOT running - attempting recovery..."
-    nohup Xvfb :1 -screen 0 1366x768x24 > /tmp/xvfb.log 2>&1 &
+    save_pid "xvfb" "$XVFB_PID"
     sleep 3
 fi
 
-# Step 6b: Generate TLS certificate (optional - noVNC handles encryption)
+# Step 6b: Generate TLS certificate
 step "Generating TLS certificate..."
 CERT_DIR="/root/.vnc/certs"
 mkdir -p "${CERT_DIR}"
@@ -204,38 +231,24 @@ else
     log "TLS certificate already exists"
 fi
 
-# Step 6c: Start XFCE desktop session (CRITICAL - must be before VNC)
+# Step 6c: Start XFCE desktop session
 step "Starting XFCE desktop session..."
-if pgrep -f "startxfce4" > /dev/null 2>&1; then
-    log "XFCE already running"
+nohup dbus-launch --exit-with-session startxfce4 > /tmp/xfce.log 2>&1 &
+XFCE_PID=$!
+save_pid "xfce" "$XFCE_PID"
+sleep 5
+
+if ps -p "$XFCE_PID" > /dev/null 2>&1; then
+    log "XFCE started with PID ${XFCE_PID}"
 else
-    # Kill any existing dbus processes
-    pkill -f "dbus-daemon" 2>/dev/null || true
-    sleep 1
-
-    # Start XFCE with dbus in background
-    nohup dbus-launch --exit-with-session startxfce4 > /tmp/xfce.log 2>&1 &
-    XFCE_PID=$!
-    sleep 5
-
-    if ps -p $XFCE_PID > /dev/null 2>&1; then
-        log "XFCE started with PID ${XFCE_PID}"
-    else
-        log "XFCE process started (background)"
-    fi
+    warn "XFCE process may not be running - check /tmp/xfce.log"
 fi
 
-# Verify DISPLAY
 export DISPLAY=:1
 
-# Step 6d: Start VNC server with explicit backgrounding and verification
+# Step 6d: Start VNC server
 step "Starting TigerVNC server..."
 
-# Kill any existing VNC on port 5901
-fuser -k 5901/tcp 2>/dev/null || true
-sleep 1
-
-# Start tigervncserver in background with nohup
 nohup tigervncserver :1 \
     -geometry 1366x768 \
     -depth 24 \
@@ -246,34 +259,35 @@ nohup tigervncserver :1 \
     > /tmp/vnc.log 2>&1 &
 
 VNC_PID=$!
+save_pid "tigervnc" "$VNC_PID"
 sleep 3
 
-# Check if VNC is running
+VNC_RUNNING=false
 if ss -tlnp 2>/dev/null | grep -q ":5901"; then
-    log "TigerVNC server running on port 5901 (PID: ${VNC_PID})"
-elif pgrep -f "Xtigervnc" > /dev/null 2>&1; then
-    log "TigerVNC is running"
-else
-    # Try x11vnc fallback
-    warn "TigerVNC failed - trying x11vnc fallback..."
+    VNC_RUNNING=true
+    log "TigerVNC server running on port 5901"
+elif command -v lsof >/dev/null && lsof -i :5901 >/dev/null 2>&1; then
+    VNC_RUNNING=true
+    log "VNC server is running on port 5901"
+fi
 
-    # Install x11vnc if needed
+if [ "$VNC_RUNNING" = "false" ]; then
+    warn "TigerVNC failed - trying x11vnc fallback..."
     if ! command -v x11vnc > /dev/null 2>&1; then
-        step "Installing x11vnc..."
-        apt-get install -y x11vnc 2>&1 | tail -3
+        install_pkg "x11vnc" x11vnc || true
     fi
 
-    # Start x11vnc
-    nohup x11vnc -display :1 -rfbport 5901 -shared -forever -nopw \
+    nohup x11vnc -display :1 -rfbport 5901 -shared -forever -rfbauth /root/.vnc/passwd \
         > /tmp/x11vnc.log 2>&1 &
     X11VNC_PID=$!
+    save_pid "x11vnc" "$X11VNC_PID"
     sleep 2
 
     if ss -tlnp 2>/dev/null | grep -q ":5901"; then
-        log "x11vnc fallback running on port 5901 (PID: ${X11VNC_PID})"
+        VNC_RUNNING=true
+        log "x11vnc fallback running on port 5901"
     else
         err "VNC server FAILED to start!"
-        err "Please check logs:"
         echo "  cat /tmp/vnc.log"
         echo "  cat /tmp/x11vnc.log"
         echo "  cat /tmp/xvfb.log"
@@ -283,32 +297,12 @@ fi
 # ── Step 7: Start noVNC ──
 step "Starting noVNC web server..."
 
-# Verify VNC is running before starting noVNC
-VNC_RUNNING=false
-if ss -tlnp 2>/dev/null | grep -q ":5901"; then
-    VNC_RUNNING=true
-    log "VNC is running on port 5901"
-elif pgrep -f "Xtigervnc" > /dev/null 2>&1; then
-    VNC_RUNNING=true
-    log "TigerVNC is running"
-elif pgrep -f "x11vnc" > /dev/null 2>&1; then
-    VNC_RUNNING=true
-    log "x11vnc is running"
-fi
-
 if [ "$VNC_RUNNING" = "false" ]; then
     err "VNC server is not running! Cannot start noVNC."
-    err "Please run the script again or check VNC logs"
-    cat /tmp/vnc.log 2>/dev/null | tail -20
+else
+    log "VNC is running on port 5901"
 fi
 
-# Kill any existing websockify processes
-pkill -f "websockify.*6080" 2>/dev/null || true
-pkill -f "websockify --web" 2>/dev/null || true
-sleep 2
-
-# Start websockify with nohup for proper backgrounding
-# Use venv option if available, otherwise direct command
 step "Starting websockify..."
 nohup websockify \
     --web="${NOVNC_DIR}" \
@@ -319,30 +313,23 @@ nohup websockify \
     > /tmp/novnc.log 2>&1 &
 
 NOVNC_PID=$!
+save_pid "websockify" "$NOVNC_PID"
 sleep 4
 
-# Check if noVNC is listening
 if ss -tlnp 2>/dev/null | grep -q ":6080"; then
     log "noVNC websockify running on port 6080 (PID: ${NOVNC_PID})"
 else
-    warn "noVNC may have failed to start - checking process..."
-    if pgrep -f "websockify" > /dev/null 2>&1; then
-        log "websockify process exists but port check failed"
-    else
-        err "websockify process NOT found - check /tmp/novnc.log"
-        cat /tmp/novnc.log 2>/dev/null | tail -10
-        # Try direct invocation as fallback
-        step "Trying alternative websockify invocation..."
-        nohup python3 -m websockify \
-            --web="${NOVNC_DIR}" \
-            6080 \
-            localhost:5901 \
-            > /tmp/novnc2.log 2>&1 &
-        sleep 4
-    fi
+    warn "noVNC may have failed to start - trying fallback..."
+    nohup python3 -m websockify \
+        --web="${NOVNC_DIR}" \
+        6080 \
+        localhost:5901 \
+        > /tmp/novnc2.log 2>&1 &
+    NOVNC_PID=$!
+    save_pid "websockify" "$NOVNC_PID"
+    sleep 4
 fi
 
-# Verify noVNC can serve content
 step "Testing noVNC connection..."
 for attempt in 1 2 3; do
     if curl -s --max-time 5 http://localhost:6080/ 2>/dev/null | grep -qi "novnc\|vnc"; then
@@ -358,11 +345,6 @@ done
 # ── Step 8: Start password API server ──
 step "Starting password API server..."
 
-# Save password first before starting server
-echo "${VNC_PASS}" > /root/.vnc/password.txt
-chmod 600 /root/.vnc/password.txt
-
-# Create password API server
 cat > /tmp/vnc_password_server.py << 'PYSERVER'
 #!/usr/bin/env python3
 import os
@@ -372,9 +354,12 @@ import json
 
 PORT = 6081
 
+class ReusableTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
 class VncPasswordHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/vnc-password' or self.path == '/api/password':
+        if self.path in ('/vnc-password', '/api/password'):
             try:
                 with open('/root/.vnc/password.txt', 'r') as f:
                     password = f.read().strip()
@@ -398,47 +383,34 @@ class VncPasswordHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-with socketserver.TCPServer(("", PORT), VncPasswordHandler) as httpd:
-    httpd.allow_reuse_address = True
+with ReusableTCPServer(("", PORT), VncPasswordHandler) as httpd:
     httpd.serve_forever()
 PYSERVER
 
 chmod +x /tmp/vnc_password_server.py
 
-# Kill any existing password server
-pkill -f "vnc_password_server.py" 2>/dev/null || true
-sleep 1
-
-# Start password server in background
 nohup python3 /tmp/vnc_password_server.py > /tmp/password_server.log 2>&1 &
 PASSWORD_PID=$!
+save_pid "password_server" "$PASSWORD_PID"
 sleep 1
 
-# Verify server is running
 if ss -tlnp 2>/dev/null | grep -q ":6081"; then
     log "Password API server running on port 6081 (PID: ${PASSWORD_PID})"
-else
-    warn "Password server check - may still be starting"
 fi
 
 # ── Step 9: Start Cloudflare Tunnel ──
 step "Starting Cloudflare Tunnel (please wait ~60 seconds)..."
 
-# Kill any existing cloudflared
-pkill -f "cloudflared" 2>/dev/null || true
-sleep 1
-
-# Start cloudflared tunnel
 nohup cloudflared tunnel \
     --url http://localhost:6080 \
     --no-autoupdate \
     > /tmp/cloudflared.log 2>&1 &
 
 CF_PID=$!
+save_pid "cloudflared" "$CF_PID"
 TUNNEL_URL=""
 TUNNEL_READY=false
 
-# Poll for tunnel URL with extended timeout
 step "Waiting for tunnel URL (up to 60 seconds)..."
 for i in $(seq 1 30); do
     sleep 2
@@ -470,13 +442,9 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}         Cloud Linux GUI - Installation Complete${NC}"
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
 
-# Save password to files
-echo "${VNC_PASS}" > /root/.vnc/password.txt
-chmod 600 /root/.vnc/password.txt
 echo "${VNC_PASS}" > /opt/vnc_password.txt
-chmod 644 /opt/vnc_password.txt
+chmod 600 /opt/vnc_password.txt
 
-# Try to get tunnel URL one more time if not found
 if [ -z "${TUNNEL_URL}" ]; then
     TUNNEL_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -1)
 fi
@@ -489,41 +457,46 @@ if [ -n "${TUNNEL_URL}" ]; then
     echo -e "  ${BLUE}Desktop URL:${NC}"
     echo -e "     ${GREEN}${TUNNEL_URL}/vnc.html${NC}"
     echo ""
-    echo -e "  ${BLUE}VNC Password:${NC} ${YELLOW}${VNC_PASS}${NC}"
-    echo ""
     echo -e "  ${BLUE}Alternative (direct):${NC}"
     echo -e "     ${GREEN}${TUNNEL_URL}/vnc_lite.html${NC}"
     echo ""
 else
     echo ""
     echo -e "  ${YELLOW}Cloudflare Tunnel still initializing...${NC}"
+    echo -e "  ${YELLOW}Get URL: cat /tmp/cloudflared.log | grep trycloudflare${NC}"
+    echo -e "  ${YELLOW}Or wait: cat /opt/tunnel_url.txt${NC}"
     echo ""
-    echo -e "  ${YELLOW}To get tunnel URL, run:${NC}"
-    echo -e "     ${YELLOW}cat /tmp/cloudflared.log | grep trycloudflare${NC}"
-    echo ""
-    echo -e "  ${YELLOW}Or wait and check:${NC}"
-    echo -e "     ${YELLOW}cat /opt/tunnel_url.txt${NC}"
-    echo ""
-    echo -e "  ${YELLOW}VNC Password:${NC} ${YELLOW}${VNC_PASS}${NC}"
 fi
 
 echo ""
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
 echo ""
 
-# ── Service Status ──
+# ── Service Status (checks by PID, not by name) ──
 echo -e "${BLUE}Service Status:${NC}"
 echo ""
-pgrep -f "Xtigervnc|Xvnc|x11vnc" > /dev/null \
+
+check_pid() {
+    local pidfile="$PID_DIR/$1"
+    if [ -f "$pidfile" ]; then
+        local pid=$(cat "$pidfile" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+check_pid "tigervnc" || check_pid "x11vnc" \
     && echo -e "  VNC Server  : ${GREEN}● Running${NC}" \
     || echo -e "  VNC Server  : ${RED}● Stopped${NC}"
-pgrep -f "websockify" > /dev/null \
+check_pid "websockify" \
     && echo -e "  noVNC       : ${GREEN}● Running${NC}" \
     || echo -e "  noVNC       : ${RED}● Stopped${NC}"
-pgrep -f "cloudflared" > /dev/null \
+check_pid "cloudflared" \
     && echo -e "  Tunnel      : ${GREEN}● Running${NC}" \
     || echo -e "  Tunnel      : ${RED}● Stopped${NC}"
-pgrep -f "xfce4" > /dev/null \
+check_pid "xfce" \
     && echo -e "  Desktop     : ${GREEN}● Running${NC}" \
     || echo -e "  Desktop     : ${RED}● Stopped${NC}"
 
@@ -533,6 +506,12 @@ echo ""
 echo -e "  ${YELLOW}Get URL:${NC}    cat /opt/tunnel_url.txt"
 echo -e "  ${YELLOW}VNC Log:${NC}    cat /tmp/vnc.log"
 echo -e "  ${YELLOW}Tunnel Log:${NC} cat /tmp/cloudflared.log | tail -20"
-echo -e "  ${YELLOW}Restart:${NC}    sudo bash /tmp/setup.sh"
-echo -e "  ${YELLOW}Stop All:${NC}   pkill -f cloudflared; pkill -f websockify; tigervncserver -kill :1"
+echo -e "  ${YELLOW}Restart:${NC}    sudo bash install.sh"
+echo -e "  ${YELLOW}Stop All:${NC}   /opt/cloud-linux-gui/stop.sh"
 echo ""
+
+if [ -n "${TUNNEL_URL}" ]; then
+    echo -e "  ${YELLOW}Your VNC password is saved in:${NC} /root/.vnc/password.txt"
+    echo -e "  ${YELLOW}Backup copy:${NC} /opt/vnc_password.txt"
+    echo ""
+fi
