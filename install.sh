@@ -41,6 +41,7 @@ cleanup_all() {
 
 # Clean up orphaned processes from a prior run (by PID file, not by name)
 cleanup_all 2>/dev/null || true
+mkdir -p "$PID_DIR"
 rm -f /tmp/.X*-lock 2>/dev/null || true
 rm -rf /tmp/.X11-unix/X* 2>/dev/null || true
 
