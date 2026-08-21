@@ -192,6 +192,12 @@
             border-color: #00d4ff;
         }
 
+        .key.active {
+            background: rgba(0, 212, 255, 0.4);
+            border-color: #00d4ff;
+            box-shadow: 0 0 8px rgba(0, 212, 255, 0.5);
+        }
+
         .toast {
             position: fixed;
             top: 80px;
@@ -243,9 +249,9 @@
     <div id="mobile-keys">
         <button class="key" onclick="sendKey('Escape')">ESC</button>
         <button class="key" onclick="sendKey('Tab')">TAB</button>
-        <button class="key" onclick="sendKey('Control_L')">CTRL</button>
-        <button class="key" onclick="sendKey('Alt_L')">ALT</button>
-        <button class="key" onclick="sendKey('Shift_L')">SHIFT</button>
+        <button class="key" data-key="Control_L" onclick="sendKey('Control_L')">CTRL</button>
+        <button class="key" data-key="Alt_L" onclick="sendKey('Alt_L')">ALT</button>
+        <button class="key" data-key="Shift_L" onclick="sendKey('Shift_L')">SHIFT</button>
         <button class="key" onclick="sendKey('Enter')">ENTER</button>
         <button class="key" onclick="sendKey('BackSpace')">⌫</button>
         <button class="key" onclick="sendKey('ArrowUp')">↑</button>
@@ -256,17 +262,40 @@
 
     <div id="toast" class="toast">Copied!</div>
 
-    <!-- VNC Client Library -->
-    <script src="https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js"></script>
+    <!-- VNC Client Library (local - no CDN dependency, works offline) -->
+    <script type="module">
+        import RFB from './core/rfb.js';
 
-    <script>
         let rfb;
         let connected = false;
 
-        // Get VNC password from session or URL parameter (set by server)
+        // Modifier keys (CTRL/ALT/SHIFT/WIN) toggle: first tap holds the key
+        // down, second tap releases it. Regular keys fire press+release.
+        const MODIFIERS = ['Control_L', 'Alt_L', 'Shift_L'];
+        const heldModifiers = {};
+
+        function setKeyVisual(key, active) {
+            document.querySelectorAll('#mobile-keys .key').forEach((btn) => {
+                if (btn.dataset.key === key) btn.classList.toggle('active', active);
+            });
+        }
+
+        function releaseAllModifiers() {
+            for (const key of Object.keys(heldModifiers)) {
+                if (heldModifiers[key] && rfb) rfb.sendKey(key, null, false);
+                delete heldModifiers[key];
+                setKeyVisual(key, false);
+            }
+        }
+
+        // Get VNC password: ?password= (canonical), ?vnc_password= (legacy),
+        // or sessionStorage
         function getVncPassword() {
             const urlParams = new URLSearchParams(window.location.search);
-            return urlParams.get('vnc_password') || sessionStorage.getItem('vnc_password') || '';
+            return urlParams.get('password')
+                || urlParams.get('vnc_password')
+                || sessionStorage.getItem('vnc_password')
+                || '';
         }
 
         // Get current tunnel URL
@@ -288,21 +317,29 @@
                 const vncPassword = getVncPassword();
                 rfb = new RFB(screen, url, {
                     credentials: { password: vncPassword },
+                    // NOTE: noVNC options are snake_case; camelCase keys are silently ignored
                     reconnect: true,
-                    reconnectDelay: 1000,
-                    maxReconnectAttempts: 10
+                    reconnect_delay: 2000
                 });
 
                 rfb.addEventListener('connect', () => {
                     connected = true;
                     document.getElementById('loading').classList.add('hidden');
                     document.querySelectorAll('#controls .btn')[3].classList.add('connected');
+                    rfb.scaleViewport = true;
+                    rfb.resizeSession = true;
                 });
 
                 rfb.addEventListener('disconnect', () => {
                     connected = false;
+                    releaseAllModifiers();
                     document.getElementById('loading').classList.remove('hidden');
                     document.querySelectorAll('#controls .btn')[3].classList.remove('connected');
+                });
+
+                rfb.addEventListener('credentialsrequired', () => {
+                    const password = prompt('VNC password (leave blank if none):') || '';
+                    if (rfb) rfb.sendCredentials({ password });
                 });
 
                 rfb.addEventListener('clipboard', (e) => {
@@ -345,13 +382,22 @@
         }
 
         function sendKey(key) {
-            if (rfb && connected) {
+            if (!rfb || !connected) return;
+            if (MODIFIERS.includes(key)) {
+                const down = !heldModifiers[key];
+                // noVNC signature: sendKey(keysym, code, down)
+                rfb.sendKey(key, null, down);
+                heldModifiers[key] = down;
+                setKeyVisual(key, down);
+            } else {
                 rfb.sendKey(key);
             }
         }
 
         function refresh() {
             if (rfb) {
+                // Stop the old client from auto-reconnecting before making a new one
+                rfb.reconnect = false;
                 rfb.disconnect();
                 setTimeout(connect, 1000);
             }
@@ -370,6 +416,13 @@
             setTimeout(() => toast.classList.remove('show'), 2000);
         }
 
+        // Expose handlers used by inline onclick attributes (module scope
+        // is not global)
+        Object.assign(window, {
+            toggleFullscreen, sendCtrlAltDel, toggleKeyboard, showKeyboard,
+            sendKey, refresh, copyUrl
+        });
+
         // Handle paste from browser
         document.addEventListener('paste', (e) => {
             const text = e.clipboardData.getData('text');
@@ -386,7 +439,7 @@
 
         // Handle resize
         window.addEventListener('resize', () => {
-            if (rfb && connected) rfb.resize();
+            if (rfb && connected) rfb.scaleViewport = true;
         });
 
         // Handle keyboard shortcuts
